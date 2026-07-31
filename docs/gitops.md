@@ -34,6 +34,65 @@ Turn off `selfHeal` temporarily during incident response if you need to hotfix i
 
 Use separate ArgoCD `Application`s (or a separate ArgoCD instance) per environment (dev/staging/prod), each pointing at the same manifests but a different Git branch, tag, or `helm-values/` overlay. Promote by merging/tagging in Git, not by editing the cluster.
 
+Three common promotion strategies, in increasing order of rigor:
+
+1. **Branch-per-environment** (`main` → staging, `production` branch → prod): promote by merging `main` into `production`. Simplest to reason about, but a long-lived `production` branch can drift from `main` if merges aren't disciplined — treat it as a fast-forward-only merge target, never commit directly to it.
+2. **Tag-based promotion**: each environment's `Application.spec.source.targetRevision` pins a Git tag (`v1.4.2`) rather than a branch. Promote by moving the tag reference in the environment's `Application` manifest (a one-line PR), which gives you an explicit, auditable "what's actually running in prod right now" answer without needing branch archaeology.
+3. **Overlay-based (Kustomize) promotion**: one set of base manifests plus per-environment `kustomization.yaml` overlays (`overlays/staging/`, `overlays/production/`) that patch image tags, replica counts, and resource limits. Promotion becomes "the same base manifests, different overlay," which is the strongest guarantee that staging and production aren't secretly different applications wearing the same name.
+
+Whichever strategy you pick, the invariant that matters is: **the promotion action itself is a Git operation** (merge, tag move, PR-and-approve) — if promoting to production ever requires a person to run a `kubectl`/`helm` command by hand, the GitOps guarantee (Git as sole source of truth) is already broken for that environment.
+
+### ApplicationSets for multi-environment/multi-cluster fan-out
+
+Rather than hand-writing one `Application` per environment or cluster, an `ApplicationSet` generates them from a template:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-stack
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: staging
+            cluster: https://staging-cluster.example.com
+            valuesFile: helm-values/staging.yaml
+          - env: production
+            cluster: https://prod-cluster.example.com
+            valuesFile: helm-values/production.yaml
+  template:
+    metadata:
+      name: 'platform-stack-{{env}}'
+    spec:
+      source:
+        repoURL: https://github.com/jisinth/kubernetes-production-templates.git
+        targetRevision: main
+        path: manifests/
+        helm:
+          valueFiles: ['{{valuesFile}}']
+      destination:
+        server: '{{cluster}}'
+        namespace: platform
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
+```
+
+The `list` generator above is the simplest case; the `git` generator (scan a directory of environment folders) and `cluster` generator (fan out to every cluster Argo CD has registered) scale better once you have more than a handful of environments — see [`manifests/argocd/README.md`](../manifests/argocd/README.md#references) for the ApplicationSet controller docs.
+
+### Progressive delivery (canary/blue-green) alongside GitOps
+
+Plain `Application` sync is all-or-nothing at the Deployment level — for gradual rollout with automated metric-based rollback, pair Argo CD with [Argo Rollouts](https://argo-rollouts.readthedocs.io/): swap a Deployment for a `Rollout` CR, add an `AnalysisTemplate` querying Prometheus (see `manifests/prometheus/`) for error-rate/latency SLOs, and Argo CD syncs the `Rollout` object exactly like any other resource — the progressive-delivery logic runs inside the cluster via the Rollouts controller, not inside Argo CD itself.
+
+### Rollback runbook
+
+Because Git holds the full history, rollback is a promotion in reverse — but do it deliberately, not by panic-reverting:
+
+1. Identify the last-known-good state: `argocd app history <app>` (deploy-level) or `git log -- manifests/<component>/` (change-level) to find the exact commit/sync ID.
+2. Prefer `git revert` (a new commit undoing the change) over `git reset`/force-push — this preserves the audit trail of *what broke* rather than erasing it, which matters for the postmortem.
+3. If the fix truly can't wait for a PR+merge cycle, `argocd app rollback <app> <HISTORY_ID>` reverts the *live* cluster to a prior sync immediately — but this creates exactly the kind of Git/cluster divergence GitOps exists to prevent, so follow up with the actual Git revert within the same incident, and expect `selfHeal` to fight your manual rollback until Git and cluster agree again (temporarily disable `selfHeal` on that Application if it's re-applying the bad state faster than you can revert Git).
+
 ## Verification
 
 ```bash

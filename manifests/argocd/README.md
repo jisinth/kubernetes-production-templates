@@ -106,6 +106,29 @@ kubectl apply -f manifests/argocd/repo-secret.yaml
 kubectl apply -f manifests/argocd/application.yaml
 ```
 
+### Upgrading
+
+1. **CRDs first.** The `argo/argo-cd` chart bundles the `Application`/`AppProject`/`ApplicationSet` CRDs; a `helm upgrade` applies the new versions automatically unless `crds.install: false` (common in GitOps-managed-CRD setups), in which case apply the new CRD manifests from the [Argo CD release](https://github.com/argoproj/argo-cd/releases) before upgrading the chart.
+2. **Read the Argo CD upgrade notes for every major version crossed**, not just the target — Argo CD has changed RBAC policy CSV syntax, default sync behaviors, and the `Application` CRD's API group/version across majors; skipping straight from an old major to the latest can hit several breaking changes at once with no clear single cause.
+3. **`application-controller` upgrades are the highest-risk step** — it's a StatefulSet holding in-memory reconciliation state; a botched upgrade can leave Applications stuck `Unknown` health until the controller fully restarts. Watch `kubectl -n argocd logs statefulset/argocd-application-controller` during the rollout, not just pod readiness.
+4. **Dry-run the RBAC policy CSV** (`rbac.yaml`) against the new version — `p, role:developer, exec, create, applications/*, deny`-style policies have had syntax refinements between majors; a policy that silently stops parsing correctly fails open or closed depending on the default policy, so verify explicitly with `argocd admin settings rbac can` rather than assuming.
+5. Since repo-server and server are stateless, they upgrade via a normal rolling update with zero special handling — only the controller (and redis, if `redis-ha` is enabled) need the extra care above.
+
+### Migrating from a different CD approach
+
+**From push-based CI/CD (Jenkins/GitHub Actions running `kubectl apply`/`helm upgrade` directly):**
+
+1. Install Argo CD and point a *new* `Application` at a low-risk component first (not the whole `manifests/` tree at once) with `syncPolicy` set to manual (no `automated:` block) — this lets Argo CD show you the diff between what CI last applied and what's actually declared in Git without touching anything yet.
+2. Reconcile any drift the diff reveals (things CI applied imperatively that never made it back into Git) by committing the missing state to Git, not by editing the cluster — the goal is Git becoming the true source of truth before automation is turned on.
+3. Once `argocd app diff` shows clean for that component, enable `automated: {prune: true, selfHeal: true}` and delete the corresponding step from the CI pipeline.
+4. Repeat component-by-component rather than cutting the whole repo over at once — a single bad `ignoreDifferences` gap or CRD Argo CD doesn't understand can otherwise take down deployment for everything simultaneously.
+
+**From Flux (or another GitOps tool):**
+
+1. Both tools can run side-by-side pointed at different paths/namespaces without conflict — migrate by moving one component's path from Flux's `Kustomization`/`HelmRelease` management to an Argo CD `Application` at a time.
+2. Watch specifically for `selfHeal`-vs-Flux-reconciler races during the overlap window if both ever end up pointed at the *same* resource — remove it from the old tool's management scope before adding it to the new one's, don't run both against one resource simultaneously.
+3. Port any Flux-specific patterns (`Kustomization` post-build substitutions, `HelmRelease` value merging) to their Argo CD equivalents (Kustomize overlays, `Application.spec.source.helm.valuesObject`) explicitly — there's no automatic translation between the two tools' config models.
+
 Retrieve the initial admin password (bootstrap only — rotate/delete it
 immediately after logging in once, see Security below):
 
@@ -196,6 +219,14 @@ argocd login localhost:8080 --username admin --insecure
   `--status-processors`/`--operation-processors` flags to raise reconcile
   parallelism before adding shards.
 
+### High Availability considerations
+
+- **HA is off by default in this repo's `values.yaml`** (documented in the comment block at the top) — a single-node dev/staging cluster doesn't need `redis-ha`'s 3 extra pods and Sentinel overhead; flip it on deliberately for production, don't assume the default is production-ready as-is.
+- **`server` and `repo-server` are stateless and trivially HA** — just raise `replicas`; the only shared state they depend on (repo cache, session data) lives in redis, so losing an individual server/repo-server pod is a non-event as long as replicas > 1.
+- **`application-controller` HA means sharding, not just replicas** — a lone controller replica holds the full reconciliation workload; adding replicas without enabling sharding (`ARGOCD_CONTROLLER_SHARDING_ALGORITHM`) does not distribute load or provide failover for in-progress reconciliation, each shard owns a disjoint set of Applications/clusters instead.
+- **redis is the actual single point of failure in a non-HA install** — server and controller both depend on it for caching; `redis-ha.enabled: true` (3 Sentinel-managed replicas) is a prerequisite for the *rest* of the stack's HA to mean anything, not an optional nice-to-have once you've scaled server/controller/repo-server.
+- **Multi-cluster deployments**: Argo CD itself typically runs in one "hub" cluster and manages many "spoke" clusters via registered cluster credentials — the hub cluster running Argo CD is a control-plane dependency for *deployments* to all spokes, but spoke clusters keep running their last-applied state fine if the hub goes down; only new syncs/drift-correction pause until it recovers.
+
 ## Common Problems
 
 - **`ComparisonError: repository not permitted in project` on sync** — the
@@ -226,6 +257,8 @@ argocd login localhost:8080 --username admin --insecure
   `application.yaml` covers README/values files, or split Argo CD's own
   manifests into a project Argo CD doesn't manage itself (bootstrap it
   imperatively once, then let GitOps take over everything else).
+- **Application stuck `Unknown` health after an `application-controller` upgrade or restart** — the controller lost its in-memory reconciliation cache and hasn't finished re-establishing watches on every tracked resource yet. This resolves on its own within a minute or two on most cluster sizes; if it persists, check controller logs for repeated watch errors (often an RBAC gap introduced by a chart upgrade changing the controller's ClusterRole).
+- **`argocd app sync` succeeds via CLI but the UI still shows `OutOfSync`** — a stale browser session or cached UI state, not a real sync failure; hard-refresh the Application (`argocd app get <app> --hard-refresh` or the UI's refresh button) before assuming there's a real drift the CLI missed.
 
 ## Best Practices
 
