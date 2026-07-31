@@ -51,3 +51,17 @@ kubectl -n ingress-nginx get svc ingress-nginx-controller
 ```
 
 Confirm the `EXTERNAL-IP` is assigned and reachable, then proceed through the rest of [`docs/introduction.md`](../../docs/introduction.md).
+
+## Production hardening
+
+- **Private API server**: add `--enable-private-cluster` at creation time (irreversible after the fact — cannot be toggled on an existing cluster) so the Kubernetes API is only reachable from within the VNet/peered networks; pair with `--api-server-authorized-ip-ranges` if you need a public endpoint restricted to specific CIDRs instead of fully private.
+- **Node pool separation**: run a dedicated system node pool (`az aks nodepool add --mode System`) tainted against application workloads, plus one or more user node pools for actual application scheduling — this keeps control-plane-adjacent add-ons (CoreDNS, metrics-server) from being evicted by application pod churn/autoscaling.
+- **Azure AD integration for cluster RBAC**: `--enable-aad --enable-azure-rbac` maps Azure AD groups to Kubernetes RBAC roles, so `manifests/security/rbac-baseline.yaml`-style bindings can reference AD group object IDs instead of managing a separate cluster-local identity system.
+- **Managed control-plane upgrades**: AKS upgrades the control plane independently of node pools; use `az aks upgrade --control-plane-only` first, validate, then upgrade node pools with `az aks nodepool upgrade` using surge settings (`--max-surge 33%`) so capacity doesn't drop during the rolling upgrade. Never let node pool version skew exceed two minor versions behind the control plane (Kubernetes' supported skew policy).
+- **Cost controls**: use a mix of `--priority Spot` node pools (with taints) for interruptible/batch workloads alongside the on-demand system/user pools, and keep `--min-count`/`--max-count` on the cluster autoscaler tight enough to avoid idle spend during low-traffic periods.
+
+## Multi-cluster & disaster recovery
+
+- **Cross-region DR**: provision a second AKS cluster in a paired Azure region (e.g. East US ↔ West US), point Velero's `BackupStorageLocation` at a geo-redundant storage account (`--sku Standard_RAGRS`) so backups survive a single-region outage — see [`../../manifests/velero/README.md`](../../manifests/velero/README.md) and [`../../manifests/backup/README.md`](../../manifests/backup/README.md) for the restore mechanics and DR posture options (backup-only vs. pilot-light vs. warm standby).
+- **GitOps fan-out**: register both clusters with one Argo CD instance (typically in the primary region) using an `ApplicationSet` cluster generator, or run independent Argo CD instances per cluster synced from the same repo — see [`docs/gitops.md`](../../docs/gitops.md#applicationsets-for-multi-environmentmulti-cluster-fan-out).
+- **StorageClass parity**: if DR restores land on a cluster provisioned identically (same `disk.csi.azure.com` StorageClass names), Velero's PV restore works without remapping; keep StorageClass names consistent across regions deliberately rather than letting them drift.

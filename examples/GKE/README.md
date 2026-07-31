@@ -49,3 +49,17 @@ gcloud container clusters describe <CLUSTER_NAME> --zone us-central1-a --format=
 ```
 
 Confirm Workload Identity is enabled and the LoadBalancer `EXTERNAL-IP` is reachable before proceeding.
+
+## Production hardening
+
+- **Private cluster**: `--enable-private-nodes` (nodes have no public IPs) combined with `--enable-master-authorized-networks --master-authorized-networks <office-cidr>/32` restricts both node exposure and control-plane API access; use Cloud NAT for node egress to the internet (pulling images, etc.) since private nodes have no public IP of their own.
+- **Node pool separation**: create a dedicated system node pool (`gcloud container node-pools create system-pool --node-taints=CriticalAddonsOnly=true:NoSchedule`) for platform add-ons, separate from application node pools — mirrors the AKS/EKS pattern above.
+- **IAM + Workload Identity for human RBAC**: bind Google Groups to Kubernetes RBAC via [Google Groups for GKE](https://cloud.google.com/kubernetes-engine/docs/how-to/google-groups-rbac) so `manifests/security/rbac-baseline.yaml`-style RoleBindings can reference a Google Group principal rather than individual users.
+- **Release channels and control-plane upgrades**: `--release-channel regular` (already set above) lets Google manage control-plane upgrade timing within a channel's cadence; for tighter control use `--release-channel stable` or pin explicit versions with `--no-enable-autoupgrade` on node pools and upgrade them deliberately (`gcloud container clusters upgrade`) after validating each control-plane version in staging.
+- **Cost controls**: preemptible/Spot VM node pools for interruptible workloads (`--spot` on a node pool), and keep cluster autoscaler bounds tight; GKE Autopilot (noted above as not this repo's default target) removes node-level cost tuning entirely in exchange for per-pod billing, worth reconsidering at smaller scale.
+
+## Multi-cluster & disaster recovery
+
+- **Cross-region DR**: provision a second GKE cluster in a different region, point a second `BackupStorageLocation` at a GCS bucket with cross-region or dual-region storage class so backups survive a single-region outage — see [`../../manifests/velero/README.md`](../../manifests/velero/README.md) and [`../../manifests/backup/README.md`](../../manifests/backup/README.md) for restore mechanics and DR posture (backup-only vs. pilot-light vs. warm standby).
+- **GitOps fan-out**: one Argo CD instance managing both clusters via an `ApplicationSet` cluster generator, or Argo CD per-cluster synced from the same repo — see [`docs/gitops.md`](../../docs/gitops.md#applicationsets-for-multi-environmentmulti-cluster-fan-out).
+- **Workload Identity pool is per-project, not per-cluster**: a DR cluster in the same GCP project can reuse the same `iam.gke.io/gcp-service-account` bindings; a DR cluster in a *different* project needs its own Workload Identity Pool and IAM bindings recreated against the new cluster's identity namespace.

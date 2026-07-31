@@ -76,6 +76,23 @@ kubectl apply -f manifests/velero/backupstoragelocation.yaml
 kubectl apply -f manifests/velero/backup-schedule.yaml
 ```
 
+### Upgrading
+
+1. **Check the plugin version matrix, not just the Velero server version.** `velero-plugin-for-aws`/`-azure`/`-gcp` and `node-agent`'s kopia/restic version are versioned somewhat independently of the core server; the [compatibility matrix](https://github.com/vmware-tanzu/velero#velero-compatibility-matrix) in the Velero repo maps supported combinations — an untested combination can fail silently on restore rather than on backup, which is the worst time to discover it.
+2. **The restic → kopia migration is the single biggest historical Velero upgrade concern.** Velero switched its default fs-backup uploader from restic to kopia; backups taken under the old uploader remain restorable, but new backups after upgrading use the new one. Confirm `uploaderType` in `values.yaml` matches your intent, and don't assume an in-place "just restore" test with an old backup validates the new uploader path — test both directions explicitly across an upgrade.
+3. **CRD versions**: `Backup`/`Restore`/`Schedule`/`BackupStorageLocation` API versions have been stable for a long time, but always apply the new chart's CRDs before upgrading the server if CRDs are managed separately in your GitOps setup.
+4. Run a full backup-and-restore smoke test (see Verification) immediately after any Velero upgrade, into a scratch namespace — before trusting the upgraded install for the next scheduled production backup window.
+
+### Migrating/restoring to a different cluster (multi-cluster DR & cluster migration)
+
+Velero's cross-cluster restore is the mechanism behind both disaster recovery (rebuilding a lost cluster) and planned cluster migration (moving workloads to a new cluster/region/cloud):
+
+1. **Point the new cluster's Velero install at the *same* `BackupStorageLocation`** (same bucket, same credentials scope) as the source cluster — Velero doesn't care which cluster created a backup; any Velero install with read access to the bucket can restore from it.
+2. **StorageClass names must exist on the destination cluster before restoring PVs.** A backup taken on an EKS cluster referencing `gp3` won't automatically work restoring into a GKE cluster — either recreate matching StorageClass names on the destination, or use `Restore.spec.namespaceMapping`/a `ConfigMap`-based [StorageClass mapping](https://velero.io/docs/latest/restore-reference/#changing-pv-provisioners-between-cloud-platforms) so PVCs bind to the destination's equivalent class.
+3. **CSI driver differences across clouds are the most common cross-cloud migration failure** — an AWS EBS CSI snapshot cannot be restored as a GCP PD; cross-cloud migration only works cleanly for fs-backup (kopia/restic) volumes, not CSI-snapshot-backed ones, unless you convert the underlying data out-of-band first. Plan cross-cloud DR/migration around fs-backup, and treat CSI snapshots as same-cloud (same-region-or-not) restore only.
+4. **Namespace and cluster-scoped resource remapping**: use `--namespace-mappings` for namespace renames during migration, and remember cluster-scoped resources (ClusterRoles, StorageClasses, the `IngressClass` itself) restore as-is — verify they don't collide with anything already present on the destination cluster before restoring.
+5. **DNS/traffic cutover is the last step, never automated by Velero** — after confirming the restored workloads are healthy on the new cluster, cut over `external-dns`-managed records (or your load balancer/DNS failover) deliberately; don't restore into a "hot" cluster that's already receiving production traffic without a controlled cutover plan.
+
 ## Verification
 
 ```bash
@@ -152,6 +169,13 @@ velero backup logs smoke-test-backup
 - Use `--parallel-item-block-workers` on the server if diagnostics show the
   backup itself (not the volume snapshot) is the bottleneck.
 
+### High Availability considerations
+
+- **The Velero server is deliberately single-replica** — like sealed-secrets, this component's reliability story is about the durability of what it produces (backups in object storage), not about the uptime of the controller itself. A Velero server outage pauses new backups/restores but doesn't affect already-completed ones or the running workloads they protect.
+- **`node-agent` HA is implicit via DaemonSet placement** — it runs on every node, so a single node's agent going down only affects fs-backup operations for pods currently scheduled on that node, not cluster-wide backup capability.
+- **The real availability question is `BackupStorageLocation` durability, not Velero's own uptime** — an S3 bucket (or equivalent) with versioning and cross-region replication enabled is what actually determines whether backups survive a regional outage; Velero itself has no opinion on this, it's a bucket configuration decision made outside this folder.
+- **Multi-cluster/multi-region DR readiness is a function of *how often* you've validated cross-cluster restore, not Velero's architecture** — see the restore-drill cadence in [`../backup/README.md`](../backup/README.md); an HA-configured Velero that's never been tested restoring into a *different* cluster provides false confidence about actual disaster recovery capability.
+
 ## Common Problems
 
 - **`BackupStorageLocation` stuck `Unavailable`** — almost always
@@ -180,6 +204,8 @@ velero backup logs smoke-test-backup
 - **Snapshot quota errors on the cloud provider (`SnapshotLimitExceeded`)**
   — TTL/retention is too long relative to your snapshot quota; shorten
   `ttl` or request a quota increase from the cloud provider.
+- **Cross-cluster restore fails with PVCs stuck `Pending`** — the destination cluster doesn't have a StorageClass matching the name referenced in the backed-up PVC spec (common when migrating between cloud providers). Create a matching StorageClass name on the destination, or use a `ConfigMap`-based StorageClass mapping at restore time (see Migrating above) rather than assuming Velero translates provisioner names automatically.
+- **Restore into a new cluster succeeds for stateless resources but PV data is empty** — the backup relied on CSI snapshots, and CSI snapshots don't transfer across cloud providers/regions/accounts the way fs-backup (kopia/restic) data does. Confirm which mechanism protected each volume (`velero backup describe <name> --details` shows this) before assuming any successful backup is portable to any destination.
 
 ## Best Practices
 

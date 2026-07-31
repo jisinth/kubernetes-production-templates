@@ -84,6 +84,30 @@ somewhere durable (a runbook, an incident-review doc) — this document
 should be updated if drills consistently show the RTO target is
 unrealistic.
 
+### Full cluster-loss disaster recovery runbook
+
+The scenario the RPO/RTO table above ultimately exists for: the cluster itself is gone (region outage, botched infrastructure change, account compromise) and you're rebuilding from scratch, not just restoring one namespace.
+
+1. **Provision the replacement cluster** per the relevant `examples/<CLOUD>/README.md` — same region if the outage was cluster-specific, a different region if it was regional. This step's duration is usually the single largest component of actual RTO; a pre-provisioned warm-standby cluster (see Multi-region below) exists specifically to remove this step from the critical path.
+2. **Install the base platform stack** (`scripts/install.sh` phases 1-2: namespaces, ingress-nginx, cert-manager, external-dns, metrics-server) — Velero needs a functioning cluster before it can restore anything into it.
+3. **Install Velero pointed at the existing `BackupStorageLocation`** — same bucket/credentials the lost cluster used; see [`../velero/README.md#migratingrestoring-to-a-different-cluster-multi-cluster-dr--cluster-migration`](../velero/README.md) for the cross-cluster restore mechanics.
+4. **Restore CRDs and their controllers before the CRs that depend on them** — restoring an `Application` CR (Argo CD) before Argo CD itself is installed, or a `Certificate` before cert-manager, leaves orphaned objects with no controller to reconcile them. Restore in dependency order: platform CRDs (cert-manager, Argo CD, Kyverno, Prometheus Operator) first, then application namespaces.
+5. **Restore application namespaces from the most recent daily backup**, verify each against its own health checks (not just "pods Running" — actual `/healthz`/readiness against real traffic patterns) before moving to DNS cutover.
+6. **Cut over DNS/traffic last, deliberately** — once `manifests/external-dns/` is running and workloads are verified healthy, let external-dns reconcile records to the new cluster's ingress, or manually update DNS/global load balancer if the new cluster is in a different region than before.
+7. **Re-establish GitOps** (`manifests/argocd/`) pointed at the same Git repository once the cluster is stable — this is what prevents the rebuilt cluster from silently drifting from what Git declares going forward.
+
+Time every step during drills, not just the restore command itself — cluster provisioning and platform-stack installation are usually a larger share of real RTO than the Velero restore operation people tend to focus on.
+
+### Multi-region / multi-cluster DR strategy
+
+Three common postures, in increasing order of RTO improvement and cost:
+
+1. **Backup-only (this repo's default)**: one production cluster, backups replicated to a different region's bucket. RTO includes full cluster provisioning time (see runbook above) — cheapest, slowest to recover, appropriate for workloads whose RTO tolerance is measured in hours.
+2. **Pilot light**: a minimal standby cluster already running in the DR region (base platform stack installed, no application workloads), kept in sync via the same GitOps repo pointed at a second `Application`/`ApplicationSet` target (see [`docs/gitops.md`](../../docs/gitops.md#applicationsets-for-multi-environmentmulti-cluster-fan-out)). On failover, restore application data via Velero into the already-running platform — this removes cluster provisioning and platform-stack installation from the critical path, cutting RTO substantially.
+3. **Warm/active-active standby**: a fully running DR cluster continuously receiving a subset of production traffic (or ready to receive 100% instantly), with data replication handled at the application/database layer (not Velero, which is a point-in-time backup tool, not a continuous-replication one) — Velero still matters here for corruption/deletion recovery (a bad deploy or accidental `kubectl delete` replicates instantly to an active-active standby, but a Velero backup from before the incident doesn't), just not for infrastructure-loss RTO.
+
+Match the posture to the RPO/RTO tier table above — don't build warm-standby infrastructure for workloads whose actual business RTO tolerance is measured in hours, and don't rely on backup-only for a tier whose RTO target is measured in minutes.
+
 ## Configuration
 
 The knobs that implement this policy live in `../velero/`:
