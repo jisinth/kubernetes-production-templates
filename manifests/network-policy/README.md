@@ -74,6 +74,24 @@ for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}'); do
 done
 ```
 
+### Migrating a brownfield cluster to default-deny
+
+Rolling out `default-deny-all` onto a cluster with existing running traffic is the riskiest part of adopting NetworkPolicy — unlike Kyverno's `Audit`/`Enforce` split, NetworkPolicy has no "log what would be blocked" mode built in. Use this staged approach instead of applying deny-all cluster-wide in one change:
+
+1. **Map existing traffic first.** Use your CNI's flow-visibility tooling if available (Cilium's Hubble, Calico's flow logs) to see actual pod-to-pod/pod-to-external traffic for a namespace before restricting it — guessing the allow-list from application knowledge alone tends to miss traffic (health checks, sidecars, batch jobs) that only runs periodically.
+2. **Pick one low-traffic, non-critical namespace first.** Apply `default-deny.yaml` + `allow-dns.yaml` + `allow-same-namespace.yaml` there, then watch error rates/logs closely for a full business cycle (including any weekly/monthly batch jobs) before calling it clean.
+3. **Add app-specific allow rules incrementally** as you discover blocked-but-legitimate traffic, rather than writing every conceivable rule up front — a NetworkPolicy that's too permissive from day one because you were guessing defeats the purpose.
+4. **Roll forward namespace-by-namespace**, not cluster-wide — a mistake in one namespace's allow-rules doesn't cascade if each namespace is validated independently before moving to the next.
+5. Keep a fast rollback path ready (`kubectl delete networkpolicy default-deny-all -n <ns>`) during the validation window for each namespace — and re-apply immediately once the missing allow-rule is identified, never leave a namespace fully open "until later."
+
+### Upgrading / changing CNI
+
+The `networking.k8s.io/v1` `NetworkPolicy` API itself is stable and portable — switching the underlying CNI (e.g. Calico → Cilium, or adding a CNI's policy add-on to a cluster that lacked one) generally doesn't require rewriting these manifests. What does need re-validation:
+
+1. **CNI-specific extensions aren't portable.** If you've adopted Cilium's `CiliumNetworkPolicy` CRD for L7/DNS-aware rules beyond what standard `NetworkPolicy` supports, those don't translate to Calico or vice versa — audit for any CNI-native CRDs before a CNI migration, not just the standard API objects in this folder.
+2. **Default enforcement behavior can differ subtly between CNIs** at the edges (e.g., exact handling of host-network pods, or whether same-node vs. cross-node traffic is treated identically) — re-run the functional verification steps below against the new CNI in a non-prod cluster before cutting production over.
+3. **Never run a CNI migration and a first-time default-deny rollout in the same change** — each is risky enough alone; conflating them makes it far harder to attribute a connectivity incident to the right cause.
+
 ## Verification
 
 ```bash
@@ -156,6 +174,12 @@ kubectl exec -n my-app deploy/my-app -- curl -m 3 http://other-app.other-ns.svc.
   pattern and reused via Kustomize/Helm templating rather than hand-copied
   per namespace.
 
+### High Availability considerations
+
+- **Enforcement is distributed, not centralized** — Calico's Felix and Cilium's per-node agent each run as a DaemonSet enforcing policy locally on every node; there's no single "NetworkPolicy service" whose loss creates a cluster-wide gap. Losing one node's policy agent affects only that node's pods, not the whole cluster's enforcement.
+- **The CNI's control plane is a separate HA concern from per-node enforcement** — Calico's Typha (an aggregation layer between Felix and the datastore) and Cilium's `cilium-operator` are themselves control-plane components that should run with multiple replicas; consult your CNI's own HA guidance, since this is outside what the NetworkPolicy API itself controls.
+- **A control-plane outage doesn't retroactively open up existing policy** — already-programmed iptables/eBPF rules on each node keep enforcing the last-known-good policy state even if the CNI's control plane is temporarily unreachable; new policy changes simply won't propagate until it recovers.
+
 ## Common Problems
 
 - **Applying `default-deny-all` immediately breaks DNS for every pod in the
@@ -185,6 +209,8 @@ kubectl exec -n my-app deploy/my-app -- curl -m 3 http://other-app.other-ns.svc.
   because they need node-to-node traffic outside the namespace** — add an
   explicit `podSelector`-based allow rule for that specific quorum port
   rather than disabling default-deny for the whole namespace.
+- **Traffic that worked fine under one CNI breaks after migrating to another** — a CNI-specific default (e.g. how host-network or same-node traffic is treated) differs between implementations even though both claim standard `NetworkPolicy` support. Re-run the full functional verification suite (DNS, intra-namespace, cross-namespace-blocked checks above) against the new CNI rather than assuming API-level compatibility means behavioral compatibility.
+- **A namespace's traffic was fine for weeks, then suddenly breaks with no policy change** — check for a periodic/monthly batch job or report generator that only runs occasionally and was never covered by the allow-rules discovered during initial rollout; this is the most common way a "successful" default-deny migration reveals a gap weeks later instead of immediately.
 
 ## Best Practices
 

@@ -95,6 +95,20 @@ kubectl patch clusterpolicy require-resource-limits \
   --type merge -p '{"spec":{"validationFailureAction":"Enforce"}}'
 ```
 
+### Upgrading
+
+1. **Check for CRD API version changes** — Kyverno has moved some CRDs through `v1`/`v2beta1`/`v2` as the project matured (e.g. `CleanupPolicy`, `PolicyException`); a `helm upgrade` applies new CRD versions, but existing `ClusterPolicy` objects authored against an older API version generally keep working via conversion — validate with `kubectl get clusterpolicy -o yaml` post-upgrade rather than assuming silently.
+2. **Autogen rule behavior has changed across versions** — Kyverno auto-generates Pod-level rules for Deployments/Jobs/CronJobs/etc. from a Pod-targeted policy; the autogen controller list and defaults have been refined between releases. Re-check `kubectl get clusterpolicy <name> -o jsonpath='{.status.autogen}'` after an upgrade to confirm coverage didn't silently narrow.
+3. **Consider Kubernetes' native `ValidatingAdmissionPolicy`** (stable since 1.30) for simple CEL-expressible rules as an alternative or complement to Kyverno going forward — it runs in-process in the API server (no webhook round-trip), which is relevant to any future architecture decision here, though it doesn't yet cover mutation/generation the way Kyverno does.
+4. Upgrade `admission-controller` before `background-controller`/`reports-controller` if the chart doesn't sequence it for you — the admission path is the one affecting live traffic, so confirm it's healthy before the less time-sensitive background components roll.
+
+### Migrating from OPA/Gatekeeper
+
+1. Install Kyverno alongside Gatekeeper — both can coexist since they're independent admission webhooks; there's no need for a flag day cutover.
+2. Rewrite each `ConstraintTemplate`/`Constraint` pair as a Kyverno `ClusterPolicy` in `Audit` mode — there's no automated Rego-to-Kyverno-YAML translator, budget real time per policy, especially for anything using complex Rego logic beyond simple field presence/value checks.
+3. Run the Kyverno equivalent in Audit mode alongside the still-Enforcing Gatekeeper constraint, and diff `PolicyReport` findings against Gatekeeper's own audit results for the same resources to confirm equivalent coverage before cutting over.
+4. Flip the Kyverno policy to `Enforce` and only then remove/disable the corresponding Gatekeeper `Constraint` — never run both in Enforce simultaneously targeting the same resources, since a resource rejected by either webhook fails regardless of the other, making failures harder to attribute to the right system.
+
 ## Verification
 
 ```bash
@@ -173,6 +187,13 @@ kubectl get policyreport -A -o wide
   watch `kyverno_admission_review_duration_seconds` — rising p99 latency is
   the leading indicator you need more replicas or narrower webhook scope.
 
+### High Availability considerations
+
+- **`admission-controller` HA directly gates cluster-wide API availability if `failurePolicy: Fail` is set anywhere** — this is the sharpest HA requirement in this entire repo: losing every admission-controller replica with a `Fail` webhook stalls every matching `kubectl apply`/controller reconcile cluster-wide, not just Kyverno-related ones. Zone-spread the 3 replicas (`podAntiAffinity` already set in `values.yaml`) and treat any change to `failurePolicy` as a change to overall cluster availability risk, not just a policy-enforcement decision.
+- **`background-controller` and `reports-controller` losses are much lower-stakes** — they affect the freshness of `PolicyReport` audit data, not admission decisions; a brief outage means audit reports lag, nothing is blocked or unblocked as a result.
+- **Webhook timeout tuning matters as much as replica count**: `webhooks[].timeoutSeconds` (chart default, tunable in `values.yaml`) determines how long the API server waits on Kyverno before applying `failurePolicy`. Too short and legitimate slow requests (during a redis/etcd blip) get rejected/ignored unnecessarily; too long and a genuinely stuck Kyverno replica makes every matching request hang for the full timeout before falling through.
+- **Rolling upgrades of the admission-controller are a controlled HA test** — the Deployment's rolling update naturally exercises "what happens when a replica briefly leaves the pool"; watch `kyverno_admission_review_duration_seconds` and API server admission latency during routine upgrades as a cheap, repeated validation that your replica count/anti-affinity actually provides the availability you expect, rather than only discovering it during a real incident.
+
 ## Common Problems
 
 - **All `kubectl apply` commands suddenly fail cluster-wide** — Kyverno is
@@ -201,6 +222,8 @@ kubectl get policyreport -A -o wide
 - **Policy exceptions needed for a specific workload** — use
   `PolicyException` CRs (Kyverno 1.11+) scoped to a specific
   resource/namespace instead of broadening a `ClusterPolicy`'s `exclude`.
+- **`kubectl apply` hangs for the full webhook timeout instead of failing fast** — `admission-controller` is up but overloaded/slow rather than fully down; check `kyverno_admission_review_duration_seconds` and admission-controller CPU/memory before assuming it's a `failurePolicy` misconfiguration.
+- **After a version upgrade, a previously-Enforce policy is silently back in Audit mode** — a Helm values regression or a `ClusterPolicy` reapplied from an out-of-date manifest in Git overwrote the `Enforce` setting. Diff the live `ClusterPolicy.spec.validationFailureAction` against Git after every upgrade rather than assuming GitOps sync alone caught it — a manual `kubectl patch` used for the audit→enforce rollout (as shown above) is exactly the kind of drift that gets silently reverted by the next Git-sourced sync unless it's committed back to the manifest.
 
 ## Best Practices
 

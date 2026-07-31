@@ -64,6 +64,24 @@ tar -xvzf kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz kubeseal
 sudo install -m 755 kubeseal /usr/local/bin/kubeseal
 ```
 
+### Upgrading
+
+1. **Controller and `kubeseal` CLI versions should stay close together.** The wire format between them has been stable across releases, but a very old `kubeseal` against a much newer controller (or vice versa) is untested territory — pin both to the same minor version range and bump them together.
+2. **Never touch the existing keypair Secret during a controller upgrade.** A `helm upgrade` on the controller Deployment doesn't rotate or regenerate the signing key by default — verify `kubectl get secrets -n kube-system -l sealedsecrets.bitnami.com/sealed-secrets-key` shows the same key(s) before and after upgrading, since an upgrade that somehow drops the key backing store is equivalent to permanent data loss for every `SealedSecret` in Git.
+3. **Take a fresh keypair backup immediately before any controller upgrade**, in addition to the standing backup practice — this is the cheapest insurance against an upgrade-induced key loss, and costs one command (see Security below).
+4. After upgrading, run the full round-trip verification test (seal a throwaway secret, confirm it decrypts) before considering the upgrade complete — a controller that starts but can't actually decrypt is a silent failure mode that otherwise surfaces only when someone next tries to roll out a real `SealedSecret`.
+
+### Migrating to/from an external secrets manager
+
+**From sealed-secrets to Vault/AWS Secrets Manager/External Secrets Operator** (common once an org outgrows Git-committed encrypted secrets — e.g. needing dynamic secret rotation, audit logging of *reads* not just writes, or centralized secret lifecycle across multiple clusters):
+
+1. Install External Secrets Operator (or equivalent) alongside sealed-secrets — they don't conflict, since ESO creates plain `Secret` objects from an external store while sealed-secrets creates them from `SealedSecret` CRs; both can target the same namespaces.
+2. Migrate the actual secret *values* into the external store first (out-of-band, not via this repo), then replace each `SealedSecret` manifest with the equivalent `ExternalSecret` CR pointing at the same path/name.
+3. Confirm the resulting plain `Secret` object is byte-identical (same keys, same values) before deleting the old `SealedSecret` — a mismatch here breaks the consuming app silently at the next pod restart, not at migration time.
+4. Do not delete the sealed-secrets controller or its keypair backup until every `SealedSecret` in every environment/branch of this repo (including old tags/releases someone might roll back to) has been migrated — a rollback to an old commit that still references sealed-secrets needs the controller and its key to still exist.
+
+**From an external secrets manager to sealed-secrets** (simplifying away from a dependency on an external system): reverse the above — seal each secret's current value from the external store using `kubeseal`, commit the `SealedSecret`, verify it decrypts to the same value, then remove the `ExternalSecret`/equivalent resource.
+
 ## Verification
 
 ```bash
@@ -108,12 +126,23 @@ kubectl delete sealedsecret test-secret
 - `strategy: Recreate` avoids two controller pods briefly running with different key states during a rollout.
 - Backing up/restoring the keypair is what actually matters for "scaling" this component's reliability, not replica count — a controller with a lost key is equivalent to a total outage regardless of how many pods you run.
 
+### High Availability considerations: disaster recovery, not uptime
+
+Sealed-secrets deliberately doesn't offer HA in the usual sense (multiple active replicas) — the real reliability question for this component is disaster recovery of the keypair, not pod uptime:
+
+- **A brief controller outage (pod restart, node drain) is a non-event** — already-created plain `Secret` objects are unaffected; only *new* `SealedSecret` → `Secret` decryption pauses until the single replica comes back, typically seconds.
+- **The keypair backup is the actual availability story.** If the controller's namespace/PVC/etcd data were ever lost entirely (cluster rebuild, disaster recovery scenario), restoring from a keypair backup (see Security) is what makes every `SealedSecret` already in Git decryptable again on the new cluster — without that backup, cluster rebuild means re-sealing every secret from original plaintext, which requires that plaintext still exists somewhere.
+- **Multi-cluster is not automatically multi-replica-HA** — each cluster's sealed-secrets controller generates its own independent keypair by default; a `SealedSecret` sealed for cluster A's controller is not decryptable by cluster B's controller. For multi-cluster deployments sharing the same sealed manifests (e.g. via GitOps `ApplicationSet` fan-out), either seal separately per cluster or deliberately provision the *same* keypair across clusters (advanced, requires manually importing the private key Secret into each cluster) — don't assume one `SealedSecret` YAML works everywhere just because the manifest is shared.
+- **Test the restore path, not just the backup step** — a backup you've never restored from is unverified; periodically (e.g. quarterly) restore the keypair backup into a scratch cluster and confirm a previously-sealed `SealedSecret` actually decrypts there.
+
 ## Common Problems
 
 1. **`SealedSecret` applied but `Secret` never materializes** — check `kubectl describe sealedsecret <name> -n <namespace>` for an error like `no key could decrypt secret`. Usually means the SealedSecret was sealed against a different controller instance/keypair (e.g. sealed for a different cluster, or the controller's key was lost/rotated away without keeping old keys).
 2. **`error: cannot fetch certificate: no endpoints available`** from `kubeseal` — the controller pod isn't running or the Service/namespace name passed to `--controller-name`/`--controller-namespace` doesn't match. Confirm with `kubectl get pods,svc -n kube-system -l app.kubernetes.io/name=sealed-secrets`.
 3. **SealedSecret works in one namespace but fails when copied to another** — default scope binds to namespace + name; copying the YAML to a different namespace without re-sealing (or without `--scope namespace-wide`/`cluster-wide` at seal time) will fail to decrypt by design. Re-seal for the target namespace instead of copy-pasting.
 4. **Lost controller keypair, all existing SealedSecrets now undecryptable** — this is unrecoverable without a backup. The only fix is to re-seal every affected secret from its original plaintext against the new keypair — which requires you (or someone) still has the original plaintext values stored somewhere. This is the reason the backup step in "Security" is not optional for production use.
+5. **A `SealedSecret` that worked for months suddenly fails to decrypt after a disaster-recovery cluster rebuild** — the new cluster's controller generated a fresh keypair instead of being restored from the old cluster's backup. Confirm the DR runbook explicitly restores the keypair Secret as one of the first steps (before re-applying any `SealedSecret` manifests), not as an afterthought discovered only when secrets fail to materialize.
+6. **`kubeseal` produces a `SealedSecret` that the controller rejects with a version/format error** — a `kubeseal` CLI version far ahead of (or behind) the controller's version used an incompatible serialization detail. Pin `kubeseal` to match the controller's version range (see Upgrading) rather than always grabbing the latest CLI release.
 
 ## Best Practices
 

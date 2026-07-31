@@ -82,6 +82,16 @@ cat manifests/security/security-context-baseline.yaml
 #   kubectl apply -f manifests/pod-security/namespace-labels.yaml
 ```
 
+### Evolving posture on a brownfield cluster (RBAC hardening)
+
+Tightening RBAC on a cluster that's already running with loose permissions (the most common real-world starting point) needs the same audit-before-enforce discipline this repo uses for Kyverno and PSA — RBAC has no built-in audit mode, so you have to build one:
+
+1. **Inventory current effective permissions before changing anything.** `kubectl get clusterrolebindings,rolebindings -A -o json | jq` (or a tool like `rbac-lookup`/`kubectl-who-can`) to see what every ServiceAccount/group/user can actually do today — you cannot safely tighten what you haven't measured.
+2. **Enable audit logging** (Kubernetes API server audit logs, or a managed cluster's equivalent) before making RBAC changes, so a permission you remove but turns out to be needed shows up as a `Forbidden` in the audit log rather than a confusing application failure with no clear cause.
+3. **Introduce `rbac-baseline.yaml`-style least-privilege roles alongside existing broad bindings**, don't delete the broad ones yet — have teams' CI/tooling start using the new narrow role explicitly (e.g. a dedicated ServiceAccount) while the old broad binding remains as a safety net.
+4. **Remove the old broad binding only after a full deploy/operational cycle** running cleanly on the narrow role — a week is rarely enough; include at least one instance of every recurring process (deploys, batch jobs, DR drills) that might depend on a permission you haven't yet identified.
+5. Repeat namespace-by-namespace or team-by-team, same as the NetworkPolicy default-deny rollout in [`../network-policy/`](../network-policy/README.md#migrating-a-brownfield-cluster-to-default-deny) — these two hardening efforts pair naturally since both follow "audit visibility first, narrow deliberately, verify before removing the fallback."
+
 ## Verification
 
 ```bash
