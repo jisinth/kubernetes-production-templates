@@ -69,6 +69,20 @@ helm upgrade --install loki grafana/loki \
 kubectl apply -f manifests/grafana/datasources/datasources.yaml
 ```
 
+### Upgrading
+
+1. **Schema/index version migrations are the single riskiest Loki upgrade step.** Loki has moved through several index schema versions (notably the `boltdb-shipper` → `tsdb` index migration, and periodic `schema_config` version bumps like v11→v12→v13). Never edit an existing `schema_config` entry in place — add a **new** dated entry with `from: <future-date>` specifying the new schema/store, leaving old entries untouched so historical data written under the old schema stays queryable. See the [storage schema docs](https://grafana.com/docs/loki/latest/configure/storage/) for the exact migration sequence for your current version.
+2. Check `compactor` behavior changes between versions — retention/compaction logic has been refined across releases, and a version bump can change how quickly old chunks are actually deleted even with `retention_period` unchanged.
+3. Upgrade `write`/`read`/`backend` component images together (they share one chart `appVersion`) — running mismatched Loki component versions across the write and read path is unsupported and can cause query errors on data written by a newer ingester.
+4. Watch the `lokiCanary` pods immediately after any upgrade — a canary reporting `response_hash mismatch` right after an upgrade is the fastest signal that something in the write path broke, well before users notice missing logs.
+
+### Migrating from an ELK/EFK stack
+
+1. Run Loki alongside Elasticsearch initially — point a *second* shipper configuration (or a dual-output Promtail/Alloy pipeline) at both backends so nothing stops flowing to the existing system during migration.
+2. Rebuild Kibana-equivalent views as Grafana Explore/dashboard LogQL queries — direct query-language translation from Lucene/KQL to LogQL isn't mechanical (Loki's label-first model is fundamentally different from Elasticsearch's full-text index), budget real time to re-learn query patterns per team, not just a syntax swap.
+3. Keep Elasticsearch's existing retention window intact until Loki has accumulated at least that much history — don't decommission the old system until nobody needs to query further back than what Loki has ingested since cutover.
+4. Expect a meaningful cost/operations difference, not just a query-language one — this is usually the actual motivation for the migration (Loki's label-only indexing is dramatically cheaper to run at log volume than Elasticsearch's full-text index), so validate that cost win materializes before fully committing.
+
 ## Verification
 
 ```bash
@@ -145,6 +159,13 @@ somewhere in the write path.
   fills or I/O saturates — migrate to S3-backed storage before that point
   if ingestion volume is growing.
 
+### High Availability considerations
+
+- **`replication_factor: 3` is what actually provides durability**, not replica count alone — with RF=3, losing any single write/ingester pod loses zero data (the other two already have the stream), which is why this repo treats dropping below 3 in production as a hard line, not a tuning knob.
+- **Zone-aware replication**: for real zone-outage tolerance, combine `replication_factor: 3` with pod anti-affinity/topology spread across zones on the `write` StatefulSet — RF=3 with all three replicas coincidentally in one zone still loses quorum if that zone goes down.
+- **The `read` path degrades gracefully, the `write` path does not**: losing `read` replicas slows/errors queries but doesn't lose data (retry against a healthy replica); losing enough `write` replicas to break quorum (more than `replication_factor - 1` simultaneously) can reject new writes outright until capacity recovers — size `write.replicas` with real headroom above the RF minimum, not exactly at it.
+- **Filesystem/PVC-backed storage undermines the write-path HA story** — even with 3 replicated writers, if all three are writing to zone-local PVCs and the storage backend itself isn't replicated across zones, a zone failure can still mean data loss for anything not yet flushed to a durable read location. S3-backed storage (inherently multi-AZ in most clouds) is the piece that actually closes this gap — treat it as part of the HA story, not just a capacity upgrade.
+
 ## Common Problems
 
 - **`429 Too Many Requests` from log shippers** — a stream (unique label
@@ -171,6 +192,8 @@ somewhere in the write path.
   `write` replicas are saturated. Check CPU/memory on write pods and scale
   `write.replicas`, or raise `grpc_server_max_recv_msg_size` if it's a
   large-batch-size issue specifically.
+- **Queries against data written before a schema migration silently return nothing** — a `schema_config` entry with the wrong `from:` date, or a migration that edited an existing entry in place instead of appending a new one, breaks Loki's ability to map old time ranges to the correct index/store. Compare `schema_config` history against `git log` on `config.yaml` for exactly when each schema version was introduced, and verify old entries were never modified after being added.
+- **Ring shows ingesters as `UNHEALTHY` after a rolling restart, queries fail cluster-wide** — a heartbeat timeout mismatch between `ring.kvstore` settings and how fast pods actually restart during a rollout (e.g. an aggressive `maxUnavailable` combined with a slow ring heartbeat interval). Check `/ring` on a write pod during the rollout, and slow down the rolling update (`maxSurge`/`maxUnavailable`) if replicas are being cycled faster than the ring can converge.
 
 ## Best Practices
 

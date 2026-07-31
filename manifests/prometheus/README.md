@@ -75,6 +75,22 @@ kubectl apply -f manifests/prometheus/alert-rules.yaml
 kubectl apply -f manifests/prometheus/recording-rules.yaml
 ```
 
+### Upgrading
+
+1. **CRDs before the chart.** `kube-prometheus-stack` bundles the Prometheus Operator CRDs (`ServiceMonitor`, `PrometheusRule`, `Alertmanager`, etc.); a `helm upgrade` normally updates them, but if `crds.enabled: false` (CRDs managed out-of-band, common in GitOps setups), apply the new CRD manifests from the chart's `crds/` directory *before* upgrading the release — an Operator running against stale CRDs can fail to reconcile new fields silently rather than erroring loudly.
+2. **Check for a Prometheus major-version bump alongside the chart bump.** The chart's `appVersion` tracks the underlying Prometheus binary; Prometheus 3.x changed several long-standing defaults (UI, some flag names, remote-write-receiver behavior) versus 2.x — read the [Prometheus 3.0 migration guide](https://prometheus.io/docs/prometheus/latest/migration/) if crossing that boundary, don't assume it's a drop-in replacement.
+3. **Validate rules against the new version before rolling to production**: `promtool check rules` against the target Prometheus version's promtool binary (rule syntax has occasionally gained new functions/behavior between versions) — run this in CI, not as a post-upgrade discovery.
+4. Because Prometheus runs as a StatefulSet, a `helm upgrade` triggers an ordered rolling update (pod 1, then pod 0) — with `replicas: 2` this means one replica is always serving during the upgrade, but confirm `podManagementPolicy` and readiness probes are tuned tightly enough that traffic (Grafana queries, Alertmanager's view of `/api/v1/alerts`) doesn't briefly hit a not-yet-ready replica.
+
+### Migrating from a different monitoring stack
+
+Moving off Datadog/New Relic/a hand-rolled Prometheus (non-Operator) setup:
+
+1. Install `kube-prometheus-stack` alongside the existing system — they don't conflict, both can scrape the same targets simultaneously.
+2. Port dashboards and alert thresholds incrementally: recreate the highest-value alerts first as `PrometheusRule` objects (see `alert-rules.yaml`), and validate they fire correctly (compare against the old system's alert history) before treating them as authoritative.
+3. Keep both systems paging on-call in parallel for at least one full on-call rotation — silent gaps in alert coverage are far worse than temporary duplicate paging, and the overlap period is what surfaces them.
+4. Decommission the old system only once dashboards, alerts, and any downstream integrations (ticketing, status pages) are fully re-pointed at the new stack.
+
 ## Verification
 
 ```bash
@@ -150,6 +166,13 @@ alerting pipeline itself is alive).
   for gossip-protocol quorum; all replicas should share the same config so
   any of them can dedupe/route identically.
 
+### High Availability considerations
+
+- **No dedup between Prometheus replicas by default**: both replicas of a 2-replica Prometheus StatefulSet scrape and store the *same* data independently — this buys availability (either can answer a query) but not deduplication or a unified global view. Grafana/Alertmanager querying one replica vs. the other can show micro-differences in scrape timing. For a genuinely deduplicated, globally-queryable view across replicas (and across clusters), add Thanos Query or Mimir in front rather than querying either replica directly.
+- **The Prometheus Operator itself is typically single-replica** — `prometheusOperator.replicas` defaults to 1 in most chart configurations because the Operator only reconciles CRDs into config (it's not on the metrics read/write path). A brief Operator outage delays picking up *new* ServiceMonitor/PrometheusRule changes but does not stop already-running Prometheus/Alertmanager pods from scraping or alerting. Raise to 2 only if CRD-reconciliation latency during an Operator restart is itself unacceptable for your change velocity.
+- **Zone-aware scheduling matters more for Alertmanager than Prometheus**: losing all 3 Alertmanager replicas to a single zone outage stops all notification delivery cluster-wide even if Prometheus is still evaluating rules correctly; set `alertmanager.alertmanagerSpec.affinity` with zone anti-affinity, mirroring the `topologySpreadConstraints` pattern used for ingress-nginx.
+- **PVC-bound StatefulSet pods don't fail over across zones** — a Prometheus replica's PVC is typically zone-local (most cloud block storage), so if that zone goes down, the pod cannot simply reschedule elsewhere with its existing data; the *other* Prometheus replica (in a different zone, if spread correctly) keeps serving, but the failed replica effectively needs to be recreated from scratch once its zone recovers, or scraping resumes from data loss in that replica's window.
+
 ## Common Problems
 
 - **`prometheus-operator` OOMKilled during startup on large clusters** —
@@ -182,6 +205,8 @@ alerting pipeline itself is alive).
 - **Prometheus pod stuck in `CrashLoopBackOff` after a config change** —
   almost always a bad PromQL expression in a `PrometheusRule`. Validate
   locally first: `promtool check rules manifests/prometheus/alert-rules.yaml`.
+- **The two Prometheus replicas disagree on whether an alert is firing** — since each replica scrapes and evaluates independently, a brief scrape failure or timing skew on one replica can cause it to lag the other by one evaluation cycle right at a threshold boundary. This is expected with unclustered replicas, not a bug; Alertmanager's own dedup (both replicas send the same alert, Alertmanager collapses it) papers over this in normal operation — if it doesn't, check both replicas' `/api/v1/rules` output for evaluation errors rather than assuming the rule itself is broken.
+- **Upgrade completes but `kube-state-metrics` stops reporting a resource type** — a k8s API version bump (e.g. a removed/renamed field) between cluster upgrades can silently drop metrics for that resource if `kube-state-metrics`'s own version predates support for the new API shape. Check `kube_state_metrics_build_info` and cross-reference its supported Kubernetes version range against your cluster version before assuming a dashboard gap is a Prometheus scraping issue.
 
 ## Best Practices
 

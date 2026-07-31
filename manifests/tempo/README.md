@@ -69,6 +69,24 @@ kubectl apply -f manifests/grafana/datasources/datasources.yaml
 Point your application's OTLP exporter at:
 `http://tempo.monitoring.svc:4317` (gRPC) or `:4318` (HTTP).
 
+### Upgrading
+
+1. Check `config.yaml`'s storage backend block against the target version's schema — Tempo's block/storage format has evolved across major versions (e.g. vParquet format revisions for the block encoding); an in-place version bump generally reads old blocks fine (backward-compatible readers), but confirm in the release notes before assuming both directions are supported if you ever need to roll back.
+2. Since this repo uses the single-binary chart, an upgrade is a standard rolling Deployment update — but the ingester briefly loses its in-memory (not-yet-flushed) spans if it's killed before flushing on shutdown. Confirm `terminationGracePeriodSeconds` gives the ingester enough time to flush its current WAL segment before the rolling update proceeds to the next pod.
+3. If using the metrics-generator, verify `remoteWriteUrl` and Prometheus's remote-write-receiver compatibility haven't drifted after upgrading either component independently — a Tempo upgrade and a Prometheus upgrade are two separate change windows that can each break this integration point.
+
+### Migrating from single-binary to tempo-distributed
+
+Referenced under Scaling below as the standard scale-out path — the concrete steps:
+
+1. Point the new `tempo-distributed` release at the **same** storage backend (S3 bucket/path) as the existing single-binary deployment — traces already written remain queryable since both chart flavors read the same block format.
+2. Cut over OTLP ingestion (the app-facing endpoint) to the new distributor's Service only once its own ingesters report healthy — running both single-binary and distributed simultaneously against the same storage backend is safe for reads, but don't dual-write new spans to both, which fragments the trace ID space across two ingestion paths unpredictably.
+3. Decommission the single-binary release once the distributed deployment has handled a full retention window's worth of traffic and dashboards/alerts relying on Tempo have been confirmed against it.
+
+### Migrating from Jaeger/Zipkin
+
+Tempo accepts both protocols natively — enable the relevant receiver in `tempo.receivers` (`jaeger` or `zipkin`) alongside OTLP, point existing instrumentation at Tempo's receiver port instead of the old backend, and migrate services to OpenTelemetry SDKs/OTLP export incrementally rather than all at once; there's no requirement to migrate protocol and backend in the same step.
+
 ## Verification
 
 ```bash
@@ -140,6 +158,13 @@ curl -sG http://localhost:9090/api/v1/query --data-urlencode \
   always search with a tight time window rather than "last 7 days" as a
   default.
 
+### High Availability considerations
+
+- **Single-binary mode has a real HA ceiling**: with one set of pods handling distributor+ingester+compactor+querier together, a single-binary replica loss drops both ingestion *and* query capability for the traces it was holding in memory/WAL, not just one or the other. Running 2+ replicas of the single-binary Deployment behind a Service spreads this risk but doesn't eliminate it the way a proper distributed ingester ring does.
+- **`tempo-distributed` is the actual HA answer**, not a scaling-only concern — splitting distributor/ingester/querier/compactor into independent Deployments means an ingester loss only affects the traces that specific ingester was holding (with replication configured), while distributors keep routing to healthy ingesters and queriers keep serving already-flushed data unaffected.
+- **In-flight (unflushed) spans are the actual data-loss window**: regardless of single-binary or distributed mode, any spans received but not yet flushed to durable storage (S3/PVC) are lost if the holding ingester pod is killed ungracefully (not via a clean rolling update). This is inherent to how trace ingestion buffers before flush — keep `terminationGracePeriodSeconds` generous and avoid `kubectl delete pod --force` on ingesters in production.
+- **The metrics-generator's dependency on Prometheus is a soft one**: if Prometheus is briefly unavailable, Tempo continues ingesting and storing traces normally — only the service-graph/RED-metrics derived data pauses, trace search/retrieval is unaffected.
+
 ## Common Problems
 
 - **Spans sent but trace not found when queried by ID** — check the
@@ -166,6 +191,8 @@ curl -sG http://localhost:9090/api/v1/query --data-urlencode \
 - **PVC fills up / traces disappearing earlier than `retention` implies**
   — filesystem storage capacity is smaller than `retention` × ingest volume
   requires; either shrink retention, raise PVC size, or migrate to S3.
+- **Traces vanish immediately after an ungraceful pod restart (node eviction, OOM kill)** — the ingester holding those spans in its WAL was killed before flushing. Check `terminationGracePeriodSeconds` and whether the restart was a clean rolling update vs. an eviction/OOM; if OOM kills are frequent, that's a separate resource-sizing problem (raise `resources.limits.memory`) masquerading as a data-loss bug.
+- **After migrating to `tempo-distributed`, some old traces become unqueryable** — usually a storage backend path/prefix mismatch between the single-binary and distributed chart's default config (they can default to slightly different S3 key prefixes). Explicitly set matching `storage.trace.s3` path configuration in both during the migration window rather than relying on each chart's defaults to happen to agree.
 
 ## Best Practices
 

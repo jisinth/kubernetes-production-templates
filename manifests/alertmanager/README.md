@@ -81,6 +81,22 @@ helm upgrade --install alertmanager prometheus-community/alertmanager \
   -f manifests/alertmanager/values.yaml
 ```
 
+### Upgrading
+
+1. **Matcher syntax**: newer Alertmanager versions standardized on the `matchers: ['severity="critical"']` list-of-expressions syntax (used throughout `config.yaml`/`routes.yaml` in this repo) over the older separate `match:`/`match_re:` maps. If migrating a config written against an older Alertmanager, convert `match`/`match_re` blocks to `matchers` expressions — both are accepted for a transition period but the old syntax is deprecated and eventually removed.
+2. Always run `amtool check-config` against the *new* Alertmanager version's binary before rolling out — a config that validated on the old version isn't guaranteed to validate identically on the new one if a directive's behavior changed.
+3. Because the gossip cluster requires all peers to be reachable on the mesh port, upgrade replicas one at a time (standard rolling update, not `Recreate`) — an all-at-once restart briefly drops the whole gossip mesh and can cause a short window of duplicate notifications as replicas rejoin and re-establish dedup state independently.
+4. Re-validate routing after upgrading with `amtool config routes test` against a representative sample of real label combinations — don't rely solely on `check-config`'s syntax validation, which doesn't catch a routing tree that parses fine but now matches differently.
+
+### Migrating from manual/ad-hoc paging
+
+Moving from a manual on-call process (someone watches a dashboard, or pages are triggered by hand) to Alertmanager-driven paging:
+
+1. Start with `receivers` pointed only at a low-stakes Slack channel — no PagerDuty — while validating that routing/grouping behaves as expected against real production alert volume for at least a week.
+2. Deliberately over-alert at first and tune down (via `inhibit_rules` and tighter `for:` durations) rather than under-alert and risk missing real incidents during the transition.
+3. Only wire up `pagerduty_configs` for `severity=critical` once the team trusts the routing tree isn't going to either spam or blackhole pages — a botched first week of real paging erodes trust in the system fast.
+4. Keep the manual process as a documented fallback (not actively used, but written down) until Alertmanager has a full on-call rotation's worth of track record.
+
 ## Verification
 
 ```bash
@@ -151,6 +167,13 @@ non-production Alertmanager before trusting a new receiver in production.
   Service/Ingress — useful for centralizing routing/on-call across
   multiple clusters.
 
+### High Availability considerations
+
+- **Gossip, not leader election**: every Alertmanager replica is a full peer — any replica can receive an alert from Prometheus, process it, and gossip the dedup/silence state to the others. There's no single "active" replica whose loss causes a failover gap, which is why Alertmanager tolerates node/zone loss more gracefully than leader-elected components.
+- **Prometheus sends to every configured Alertmanager, not just one** — `alerting.alertmanagers` in Prometheus's config (or the Operator-managed equivalent) should list every Alertmanager replica's address; if it's only pointed at one, that single replica becomes a real single point of failure regardless of how many Alertmanager pods exist.
+- **Odd replica counts avoid gossip split-brain ambiguity**: with an even count, a network partition can theoretically split the mesh into two equal halves, each believing it has quorum-equivalent standing; 3 or 5 replicas avoid a clean 50/50 split. In practice Alertmanager's gossip protocol doesn't require strict quorum to keep functioning (each half keeps notifying independently, causing duplicate — not lost — notifications during a partition), but odd counts still make the partition easier to reason about operationally.
+- **A network partition causes duplicate notifications, not silence** — this is a deliberate design tradeoff (better to over-notify than to go silent during a split); if you see the same alert notified from what looks like "two Alertmanagers," check `amtool cluster show` for a partitioned mesh rather than assuming a routing bug.
+
 ## Common Problems
 
 - **Alert fires in Prometheus but no notification arrives** — check
@@ -176,6 +199,8 @@ non-production Alertmanager before trusting a new receiver in production.
   later** — silences don't expire automatically unless created with an
   `endsAt`; audit active silences regularly (`amtool silence query`) and
   remove stale ones.
+- **Config validates and applies cleanly but Alertmanager keeps serving the old routing tree** — the config Secret was updated but Alertmanager wasn't told to reload; unlike Prometheus's `/-/reload` webhook pattern, confirm your deployment method actually triggers a reload (the Prometheus Operator's `Alertmanager` CRD watches its `configSecret` and reloads automatically; a manually-managed Secret typically needs a `kubectl rollout restart` or a reload sidecar like `configmap-reload`).
+- **Upgrade introduces duplicate notifications that persist beyond the expected partition-recovery window** — after a version upgrade that changes gossip protocol internals, mismatched Alertmanager versions briefly coexisting during a rolling update can fail to gossip cleanly with each other. Confirm the rollout actually completed (`kubectl rollout status`) and all replicas report the same version before concluding this is a routing-tree bug rather than a mid-upgrade artifact.
 
 ## Best Practices
 

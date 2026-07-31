@@ -74,6 +74,20 @@ kubectl apply -f manifests/grafana/dashboards/   # if wrapped as a ConfigMap, se
 kubectl apply -f manifests/grafana/alerts/high-cpu-alert.yaml   # after wrapping per alerts/README.md
 ```
 
+### Upgrading
+
+1. **Dashboard schema version**: dashboard JSON carries a `schemaVersion` field; Grafana auto-migrates older dashboards to the running version's schema on load, but a very old exported dashboard (schema version from several majors back) can occasionally lose panel settings during that auto-migration. Open and re-save (re-export) any dashboard sourced from an old export after a major Grafana upgrade, and diff the committed ConfigMap JSON against what Grafana now renders.
+2. **Plugin compatibility**: check each installed plugin's own compatibility range against the target Grafana version before upgrading — a plugin built against an older Grafana API can fail to load post-upgrade with an unhelpful console error rather than a clear version-mismatch message. Test in a non-prod Grafana instance with the same `plugins:` list first.
+3. **Unified alerting schema changes**: Grafana's alerting engine has changed its internal storage format across major versions (legacy alerting → unified alerting was the biggest one). If any Grafana-managed alert rules exist (`manifests/grafana/alerts/`), confirm they still evaluate correctly post-upgrade — `grafana-cli` or the Alerting UI's rule list is the fastest way to spot a rule that silently stopped evaluating.
+4. If running with SQLite (single replica, no `database:` override), take a PVC snapshot or `sqlite3 .dump` backup immediately before any major version upgrade — SQLite schema migrations are one-way, and a failed upgrade generally can't be rolled back by simply reverting the image tag.
+
+### Migrating existing dashboards into this repo
+
+1. Export the dashboard's JSON from an existing Grafana instance (dashboard settings → JSON Model, or `GET /api/dashboards/uid/<uid>`).
+2. Strip instance-specific IDs (`id`, top-level `uid` if you want Grafana to assign a fresh one) and replace hardcoded datasource UIDs with the `${DS_PROMETHEUS}`-style template variables this repo's dashboards use, so the dashboard is portable across environments.
+3. Wrap the JSON in a ConfigMap labeled `grafana_dashboard: "1"` per `dashboards/README.md`, commit it under `manifests/grafana/dashboards/`, and apply — the sidecar picks it up without a Grafana restart.
+4. Delete the manually-created dashboard from the old instance (or mark it read-only) once the ConfigMap-provisioned copy is confirmed identical, to avoid two divergent copies of the same dashboard going out of sync.
+
 ## Verification
 
 ```bash
@@ -152,6 +166,13 @@ Log into `http://localhost:3000` (or your Ingress host) and confirm the
 - `podDisruptionBudget.minAvailable: 1` keeps at least one replica up during
   node drains/upgrades.
 
+### High Availability considerations
+
+- **SQLite is the real HA blocker, not replica count**: raising `replicas` without also setting an external `database:` backend just means N pods contending for one `ReadWriteOnce` PVC — Kubernetes will only let one of them actually mount it, and the rest crash-loop on startup. True multi-replica HA requires an external Postgres/MySQL database in `values.yaml`'s `database:` block; treat `replicas > 1` with SQLite as a misconfiguration, not a degraded-but-working state.
+- **Unified alerting state lives in the database too**: once you move to external Postgres for HA, alert rule evaluation state, silences, and notification history all become shared across replicas correctly — with SQLite+single-replica, a pod restart mid-evaluation can cause a brief alerting gap (state is local to that pod's SQLite file).
+- **Sidecar provisioning is inherently HA-safe**: because dashboards/datasources are sourced from ConfigMaps (not the database), every replica independently provisions the identical set on startup — you don't need to worry about dashboard drift between replicas the way you would with UI-created dashboards.
+- **Session handling behind a LoadBalancer/Ingress**: Grafana's own session cookie is validated against the shared database once external Postgres is in place, so no sticky-session Ingress annotation is required for multi-replica — request routing can be pure round-robin.
+
 ## Common Problems
 
 - **Dashboard ConfigMap applied but doesn't show up in Grafana** — check
@@ -180,6 +201,8 @@ Log into `http://localhost:3000` (or your Ingress host) and confirm the
   own UI** — the dashboard is likely pointed at a stale/renamed datasource
   UID. Re-select the datasource on the panel, or fix the `templating`
   variable default in the dashboard JSON.
+- **Two replicas show different dashboard lists right after deploying a new ConfigMap** — the dashboard sidecar polls for ConfigMap changes rather than reacting instantly; each replica's sidecar polls independently, so there's a brief window (seconds, per `k8s-sidecar`'s `FOLDER_ANNOTATION`/resync interval) where replicas can disagree. This resolves itself within one poll cycle — don't treat it as data loss.
+- **Grafana upgrade succeeds but a previously-working panel now renders an error** — usually a panel type deprecation (old Grafana ships "Graph (old)" panels that get removed in later majors, replaced by the unified "Time series" panel). Check the release notes for panel deprecations before a major upgrade, and re-save affected dashboards using the new panel type ahead of time in a staging Grafana instance.
 
 ## Best Practices
 
