@@ -57,32 +57,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Checkov (manifests)
-        uses: bridgecrewio/checkov-action@master
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          directory: manifests/
-          framework: kubernetes
-          output_format: sarif
-          output_file_path: checkov-manifests.sarif
-          soft_fail: true
+          python-version: "3.12"
+
+      # bridgecrewio/checkov-action@master intermittently fails GitHub's
+      # ::env::/::output:: file-command parsing on large scan results
+      # (a known upstream issue), which fails the job even with
+      # soft_fail: true. Run the checkov CLI directly instead — same
+      # scan, no wrapper-action output-plumbing bug.
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov (manifests)
+        run: |
+          checkov -d manifests/ --framework kubernetes \
+            --output sarif --output-file-path checkov-manifests --soft-fail --compact
 
       - name: Run Checkov (applications)
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: applications/
-          framework: kubernetes
-          output_format: sarif
-          output_file_path: checkov-applications.sarif
-          soft_fail: true
+        run: |
+          checkov -d applications/ --framework kubernetes \
+            --output sarif --output-file-path checkov-applications --soft-fail --compact
 
       - name: Upload Checkov SARIF (manifests)
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: checkov-manifests.sarif
+          sarif_file: checkov-manifests/results_sarif.sarif
           category: checkov-manifests
 
       - name: Upload Checkov SARIF (applications)
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: checkov-applications.sarif
+          sarif_file: checkov-applications/results_sarif.sarif
           category: checkov-applications
