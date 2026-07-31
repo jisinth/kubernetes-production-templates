@@ -1,0 +1,77 @@
+# AppProject scopes what any Application assigned to it is allowed to do:
+# which Git repos it may sync from, which clusters/namespaces it may deploy
+# into, and which cluster-scoped resource kinds it may create. Without a
+# custom project, every Application defaults to "default", which has no
+# restrictions — fine for a demo, unacceptable once multiple teams share a
+# control plane.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  description: >-
+    Platform-owned infrastructure: GitOps controllers, observability,
+    security policy, backup/DR, and cluster-wide add-ons managed from
+    kubernetes-production-templates.
+
+  sourceRepos:
+    - https://github.com/jisinth/kubernetes-production-templates.git
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: "*"
+
+  # Cluster-scoped kinds this project's Applications may create/manage.
+  # Keep this list explicit rather than "*" — it's the difference between
+  # a compromised repo being able to install a CRD/Namespace vs. taking
+  # over ClusterRoleBindings cluster-wide.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: storage.k8s.io
+      kind: StorageClass
+    - group: scheduling.k8s.io
+      kind: PriorityClass
+
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+
+  roles:
+    - name: read-only
+      description: View-only access to every Application in this project.
+      policies:
+        - p, proj:platform:read-only, applications, get, platform/*, allow
+      groups:
+        - argocd-viewers
+
+    - name: sync-only
+      description: Can trigger syncs but not edit Application specs or delete apps.
+      policies:
+        - p, proj:platform:sync-only, applications, get, platform/*, allow
+        - p, proj:platform:sync-only, applications, sync, platform/*, allow
+      groups:
+        - argocd-developers
+
+  # Only signed/annotated tags or the default branch may be deployed from —
+  # tune to your branching model. Omit to allow any revision.
+  syncWindows:
+    - kind: allow
+      schedule: "* * * * *"
+      duration: 24h
+      applications:
+        - "*"
+      manualSync: true

@@ -1,0 +1,25 @@
+# Allows pods within the same namespace to talk to each other freely, while
+# still blocking cross-namespace and external traffic (unless another
+# policy explicitly allows it). This is the common middle ground between
+# "deny everything" and "allow everything" — most microservice namespaces
+# need intra-namespace chatter (app -> its own sidecar/cache/db) without
+# wanting to open the namespace to the entire cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {} # any pod in this same namespace
+  egress:
+    - to:
+        - podSelector: {} # any pod in this same namespace
+  # Remember: this does NOT include DNS egress (kube-system) or any
+  # external/internet egress — combine with allow-dns.yaml and any
+  # app-specific egress rules (e.g. to a managed database or external API).

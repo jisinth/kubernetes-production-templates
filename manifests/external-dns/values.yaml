@@ -1,0 +1,89 @@
+# Helm values for external-dns/external-dns
+# Install with:
+#   helm upgrade --install external-dns external-dns \
+#     --repo https://kubernetes-sigs.github.io/external-dns \
+#     --namespace external-dns --create-namespace \
+#     -f manifests/external-dns/values.yaml
+provider:
+  name: aws
+  # Alternatives (swap `name` and the matching provider-specific block
+  # below): google, azure, cloudflare, digitalocean, rfc2136, coredns,
+  # akamai, civo... see https://github.com/kubernetes-sigs/external-dns#status-of-providers
+
+# --- AWS (Route53) example ---
+# Prefer IRSA (IAM Roles for Service Accounts) over static credentials:
+# annotate the ServiceAccount and grant a scoped IAM policy
+# (route53:ChangeResourceRecordSets on the hosted zone, route53:ListHostedZones,
+# route53:ListResourceRecordSets) — no access keys stored in the cluster.
+serviceAccount:
+  create: true
+  name: external-dns
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/external-dns"
+    # GKE Workload Identity equivalent:
+    # iam.gke.io/gcp-service-account: external-dns@my-project.iam.gserviceaccount.com
+    # AKS Workload Identity equivalent:
+    # azure.workload.identity/client-id: "<managed-identity-client-id>"
+
+env:
+  - name: AWS_DEFAULT_REGION
+    value: us-east-1
+
+domainFilters:
+  - example.com
+
+policy: sync   # "sync" creates+deletes records to match Ingress/Service state; "upsert-only" never deletes
+
+sources:
+  - service
+  - ingress
+
+txtOwnerId: "production-cluster"
+txtPrefix: "external-dns-"
+
+registry: txt
+
+interval: 1m
+
+replicaCount: 1   # external-dns does not support HA active-active; run 1 replica with leader election if scaling replicaCount
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+podSecurityContext:
+  fsGroup: 65534
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+metrics:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  additionalLabels:
+    release: prometheus
+
+logLevel: info
+logFormat: json
+
+# Dry-run first on any new cluster/domain to preview what records would
+# change before external-dns is allowed to mutate live DNS:
+# extraArgs:
+#   - --dry-run

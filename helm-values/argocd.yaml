@@ -1,0 +1,116 @@
+# Helm values for Argo CD
+# Chart: argo/argo-cd
+# Usage: helm upgrade --install argocd argo/argo-cd \
+#          -n argocd --create-namespace -f values.yaml
+#
+# This file is mirrored at helm-values/argocd.yaml — keep both in sync.
+
+global:
+  domain: argocd.example.internal
+
+# --- High availability -------------------------------------------------
+# HA is OFF by default so this stack runs fine on a single-node dev/test
+# cluster (Minikube, small EKS/AKS/GKE node pools). For a real production
+# control plane, switch to the HA manifests/values:
+#   helm upgrade --install argocd argo/argo-cd -n argocd -f values.yaml \
+#     --set redis-ha.enabled=true \
+#     --set controller.replicas=1 \
+#     --set server.replicas=2 \
+#     --set repoServer.replicas=2 \
+#     --set applicationSet.replicaCount=2
+# The application controller is a StatefulSet and cannot be scaled
+# horizontally beyond 1 replica per shard — scale it via sharding
+# (controller.replicas + ARGOCD_CONTROLLER_SHARDING_ALGORITHM), not blindly.
+redis-ha:
+  enabled: false
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+repoServer:
+  replicas: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 75
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+server:
+  replicas: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # Terminate TLS at the ingress controller and talk plain HTTP/gRPC-Web to
+  # the argocd-server Service. If you need `argocd login` over gRPC (not
+  # gRPC-Web) through the same ingress, add the second server block from the
+  # upstream chart docs with nginx.ingress.kubernetes.io/backend-protocol: GRPC.
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    hosts:
+      - argocd.example.internal
+    tls:
+      - secretName: argocd-server-tls
+        hosts:
+          - argocd.example.internal
+
+  extraArgs:
+    # Only set this if TLS is terminated upstream (at the ingress) and you
+    # accept plain HTTP between the ingress and the server Service.
+    - --insecure
+
+configs:
+  params:
+    server.insecure: true
+
+  # Central RBAC policy — kept in sync with manifests/argocd/rbac.yaml.
+  # See that file for the full role/group breakdown.
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      p, role:developer, applications, get, */*, allow
+      p, role:developer, applications, sync, */*, allow
+      p, role:developer, logs, get, */*, allow
+      g, argocd-admins, role:admin
+      g, argocd-developers, role:developer
+    scopes: "[groups]"
+
+  cm:
+    # Enables the app-of-apps / ApplicationSet pattern and multi-source apps.
+    application.instanceLabelKey: argocd.argoproj.io/instance
+    timeout.reconciliation: 180s
+    resource.compareoptions: |
+      ignoreAggregatedRoles: true
+
+dex:
+  enabled: false
+
+notifications:
+  enabled: true

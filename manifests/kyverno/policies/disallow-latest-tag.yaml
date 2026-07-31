@@ -1,0 +1,54 @@
+# Blocks images with the ":latest" tag (or no tag at all, which defaults to
+# :latest). Mutable tags make rollbacks non-deterministic — you can't
+# `kubectl rollout undo` your way back to a known-good image if the image
+# behind a tag has since changed.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Requires an explicit, immutable image tag (or digest) rather than
+      ":latest" or an implicit tag, so deployments are reproducible and
+      rollbacks are deterministic.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Images must specify a non-"latest" tag or a digest
+          (e.g. "myapp:1.4.2" or "myapp@sha256:..."). Found an image using
+          "latest" or no tag at all.
+        pattern:
+          spec:
+            containers:
+              - image: "!*:latest"
+    - name: validate-tag-not-empty
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Every container image must include an explicit tag or digest —
+          bare "repo/image" with no ":tag" implicitly resolves to ":latest".
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ contains(element.image, ':') }}"
+                    operator: Equals
+                    value: false

@@ -1,0 +1,132 @@
+# Helm values for Grafana
+# Chart: grafana/grafana
+# Usage: helm upgrade --install grafana grafana/grafana -n monitoring -f values.yaml
+#
+# This file is mirrored at helm-values/grafana.yaml — keep both in sync.
+
+fullnameOverride: grafana
+
+replicas: 2
+
+image:
+  repository: grafana/grafana
+  tag: "11.1.0"
+
+persistence:
+  enabled: true
+  type: pvc
+  storageClassName: gp3
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Admin credentials come from a pre-created Secret, never plaintext values.
+# Create it out-of-band, e.g.:
+#   kubectl create secret generic grafana-admin-credentials \
+#     --namespace monitoring \
+#     --from-literal=admin-user=admin \
+#     --from-literal=admin-password="$(openssl rand -base64 24)"
+admin:
+  existingSecret: grafana-admin-credentials
+  userKey: admin-user
+  passwordKey: admin-password
+
+# --- Dashboard sidecar ------------------------------------------------
+# Watches ConfigMaps labeled grafana_dashboard=1 across the cluster and
+# hot-loads them into Grafana. Ship a dashboard by creating a ConfigMap
+# with that label — no Grafana restart or manual import needed.
+# See manifests/grafana/dashboards/README.md for the full convention.
+sidecar:
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    folder: /tmp/dashboards
+    provider:
+      name: sidecarProvider
+      folder: ""
+      folderUid: ""
+      disableDelete: false
+      foldersFromFilesStructure: true
+    searchNamespace: ALL
+
+  # --- Datasource sidecar ----------------------------------------------
+  # Same mechanism, but for datasources.yaml provisioning ConfigMaps
+  # labeled grafana_datasource=1. See manifests/grafana/datasources/.
+  datasources:
+    enabled: true
+    label: grafana_datasource
+    labelValue: "1"
+    searchNamespace: ALL
+
+# Dashboards baked directly into the chart (in addition to anything the
+# sidecar picks up at runtime). Keeping the canonical JSON in
+# manifests/grafana/dashboards/ and loading it via sidecar ConfigMap is the
+# preferred path — this block is only for a couple of "always there"
+# dashboards you want baked into the initial install.
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: default
+        orgId: 1
+        folder: "General"
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+# Grafana plugins installed at pod startup. See manifests/grafana/plugins/README.md
+# for the full recommended list and rationale.
+plugins:
+  - grafana-piechart-panel
+  - grafana-clock-panel
+  - grafana-polystat-panel
+
+ingress:
+  enabled: false
+  ingressClassName: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - grafana.example.internal
+  tls:
+    - secretName: grafana-tls
+      hosts:
+        - grafana.example.internal
+
+grafana.ini:
+  server:
+    root_url: "https://grafana.example.internal"
+  auth:
+    disable_login_form: false
+  auth.anonymous:
+    enabled: false
+  security:
+    cookie_secure: true
+    strict_transport_security: true
+  users:
+    allow_sign_up: false
+    default_theme: dark
+  unified_alerting:
+    enabled: true
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+
+serviceAccount:
+  create: true
+  name: grafana
+
+podDisruptionBudget:
+  minAvailable: 1

@@ -1,0 +1,68 @@
+# Grafana datasource provisioning, delivered via the datasource sidecar
+# (sidecar.datasources.enabled: true in manifests/grafana/values.yaml).
+#
+# Wrap this in a ConfigMap labeled grafana_datasource=1 so the sidecar
+# picks it up automatically — do NOT apply the raw provisioning YAML by
+# itself, Grafana's file-provisioning loader only reads it from the mounted
+# sidecar path, not directly from the API. Apply the ConfigMap below with:
+#   kubectl apply -f manifests/grafana/datasources/datasources.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    grafana_datasource: "1"
+data:
+  datasources.yaml: |
+    apiVersion: 1
+
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        # Assumes kube-prometheus-stack was installed with the release name
+        # "kube-prometheus-stack" per manifests/prometheus/values.yaml.
+        url: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: 30s
+          httpMethod: POST
+          exemplarTraceIdDestinations:
+            - name: trace_id
+              datasourceUid: tempo
+
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki-gateway.monitoring.svc:80
+        editable: false
+        jsonData:
+          maxLines: 1000
+          derivedFields:
+            # Turns a trace_id found in log lines into a clickable link to
+            # the matching Tempo trace, wiring logs -> traces correlation.
+            - datasourceUid: tempo
+              matcherRegex: "trace_id=(\\w+)"
+              name: TraceID
+              url: "$${__value.raw}"
+
+      - name: Tempo
+        uid: tempo
+        type: tempo
+        access: proxy
+        url: http://tempo.monitoring.svc:3100
+        editable: false
+        jsonData:
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: "-5m"
+            spanEndTimeShift: "5m"
+            filterByTraceID: true
+          tracesToMetrics:
+            datasourceUid: prometheus
+          serviceMap:
+            datasourceUid: prometheus
+          nodeGraph:
+            enabled: true

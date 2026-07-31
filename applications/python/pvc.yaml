@@ -1,0 +1,19 @@
+# pvc.yaml — local data/cache volume
+#
+# ReadWriteOnce is appropriate here: this volume backs a per-pod on-disk
+# cache (e.g. downloaded model artifacts, computed intermediate results)
+# that is rebuildable and not shared across replicas.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: python-app-cache
+  namespace: default
+  labels:
+    app.kubernetes.io/name: python-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 20Gi

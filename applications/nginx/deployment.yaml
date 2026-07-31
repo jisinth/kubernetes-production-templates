@@ -1,0 +1,121 @@
+# deployment.yaml — nginx static-content server
+#
+# Serves static assets (HTML/CSS/JS, images) from a shared volume. The
+# container itself ships no content baked into the image; content is
+# delivered onto the PVC out-of-band (CI job, init container, or sidecar
+# sync) and nginx just serves it read-only.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-web
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nginx-web
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: nginx-static-site
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nginx-web
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nginx-web
+        app.kubernetes.io/component: frontend
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nginx
+          image: nginx:1.27.2-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: nginx-web-config
+            - secretRef:
+                name: nginx-web-secret
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: htpasswd
+              mountPath: /etc/nginx/secrets
+              readOnly: true
+            - name: web-content
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: var-run
+              mountPath: /var/run
+            - name: var-cache-nginx
+              mountPath: /var/cache/nginx
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: nginx-web-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: htpasswd
+          secret:
+            secretName: nginx-web-secret
+            items:
+              - key: htpasswd
+                path: htpasswd
+        - name: web-content
+          persistentVolumeClaim:
+            claimName: nginx-web-content
+        - name: tmp
+          emptyDir: {}
+        - name: var-run
+          emptyDir: {}
+        - name: var-cache-nginx
+          emptyDir: {}

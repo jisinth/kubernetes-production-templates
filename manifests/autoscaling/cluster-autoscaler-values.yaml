@@ -1,0 +1,71 @@
+# Helm values for Cluster Autoscaler
+# Chart: autoscaler/cluster-autoscaler
+# Usage: helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \
+#          -n kube-system -f cluster-autoscaler-values.yaml
+#
+# Cluster Autoscaler adds/removes NODES (not pods — that's HPA/VPA/KEDA's
+# job) based on unschedulable pods and node utilization. Set `cloudProvider`
+# and `autoDiscovery` for your actual cloud; this file shows AWS as the
+# placeholder with the equivalent Azure/GCP settings commented alongside.
+
+# --- Cloud provider placeholder: swap for your actual provider ---------
+cloudProvider: aws # alternatives: azure, gce
+
+autoDiscovery:
+  # AWS: tag your node group's ASG with
+  #   k8s.io/cluster-autoscaler/enabled = true
+  #   k8s.io/cluster-autoscaler/<cluster-name> = owned
+  clusterName: REPLACE_ME-cluster-name
+  # --- Azure equivalent ---
+  # For AKS, use the AKS-specific chart flags instead of autoDiscovery:
+  #   azureClientID / azureClientSecret / azureSubscriptionID /
+  #   azureTenantID / azureResourceGroup / azureVMType: vmss /
+  #   azureClusterName / azureNodeResourceGroup
+  # --- GCP equivalent ---
+  # For GKE, prefer the built-in GKE cluster autoscaler (enabled per
+  # node-pool via `gcloud container node-pools update --enable-autoscaling`)
+  # over running this chart at all; if self-managing, use:
+  #   cloudProvider: gce
+  #   autoDiscovery.clusterName + serviceMonitor / --nodes=min:max:MIG-name
+
+awsRegion: us-east-1
+
+# IRSA (preferred over static AWS credentials) — annotate the ServiceAccount
+# with an IAM role scoped to autoscaling:Describe*/SetDesiredCapacity/
+# TerminateInstanceInAutoScalingGroup on this cluster's ASGs only.
+rbac:
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::REPLACE_ME_ACCOUNT_ID:role/cluster-autoscaler
+
+extraArgs:
+  # Only manage ASGs/node-pools tagged for this specific cluster.
+  balance-similar-node-groups: true
+  skip-nodes-with-system-pods: true
+  skip-nodes-with-local-storage: false
+  # Remove a node once utilization drops below this for the unneeded-time
+  # duration below, rather than immediately on the first idle cycle.
+  scale-down-utilization-threshold: "0.5"
+  scale-down-unneeded-time: "10m"
+  scale-down-delay-after-add: "10m"
+  # Bound overall cluster size regardless of what individual ASGs allow —
+  # a safety net against a runaway scale-up loop.
+  max-node-provision-time: "15m"
+  expander: least-waste
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 300Mi
+  limits:
+    cpu: 200m
+    memory: 500Mi
+
+replicaCount: 1
+
+podDisruptionBudget:
+  maxUnavailable: 0
+
+serviceMonitor:
+  enabled: true
+  namespace: monitoring

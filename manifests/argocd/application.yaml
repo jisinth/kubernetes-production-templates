@@ -1,0 +1,62 @@
+# Root "app of apps" Application. Argo CD watches this repo's manifests/
+# directory (plain Kustomize/YAML, one subfolder per tool) and reconciles
+# everything underneath it. Point child Applications or an ApplicationSet
+# generator at individual subfolders (manifests/argocd, manifests/velero,
+# etc.) once you outgrow a single flat Application.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kubernetes-production-templates
+  namespace: argocd
+  finalizers:
+    # Ensures Argo CD cascades deletes of everything it created for this
+    # Application when the Application itself is deleted.
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    app.kubernetes.io/part-of: platform
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/jisinth/kubernetes-production-templates.git
+    targetRevision: main
+    path: manifests/
+    directory:
+      recurse: true
+      # Argo CD will otherwise try to render README.md/values.yaml as
+      # manifests; exclude anything that isn't a plain Kubernetes object.
+      exclude: "**/README.md,**/values.yaml,**/*-values.yaml"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+
+  syncPolicy:
+    automated:
+      prune: true # Delete resources removed from Git on the next sync.
+      selfHeal: true # Revert manual/out-of-band cluster drift automatically.
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Ignore fields that autoscalers/webhooks/the API server mutate at runtime
+  # so Argo CD doesn't flag them as permanently OutOfSync.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jsonPointers:
+        - /webhooks/0/clientConfig/caBundle

@@ -1,0 +1,145 @@
+# PrometheusRule: core alerting rules for cluster and application health.
+# Consumed automatically by the Prometheus Operator via ruleSelector: {}
+# (see manifests/prometheus/values.yaml). Route these through Alertmanager
+# using the routes defined in manifests/alertmanager/config.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: general-alert-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+    role: alert-rules
+spec:
+  groups:
+    - name: pod-resource-alerts
+      rules:
+        - alert: HighPodMemory
+          expr: |
+            sum(container_memory_working_set_bytes{container!="", container!="POD"}) by (namespace, pod, container)
+              / sum(kube_pod_container_resource_limits{resource="memory"}) by (namespace, pod, container)
+              > 0.90
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is near its memory limit"
+            description: >-
+              Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+              has used more than 90% of its memory limit for 10 minutes. It is at risk of OOMKill.
+            fix: >-
+              Check for a memory leak with `kubectl top pod -n {{ $labels.namespace }} {{ $labels.pod }}`
+              and recent memory trend in Grafana. If usage is legitimate, raise the container's memory
+              limit/request; if it looks like a leak, restart the pod and file a bug against the owning team.
+            runbook_url: "https://runbooks.example.internal/HighPodMemory"
+
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total[15m]) > 3
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+            description: >-
+              Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+              has restarted more than 3 times in the last 15 minutes.
+            fix: >-
+              Run `kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c {{ $labels.container }} --previous`
+              to see the crash reason. Common causes: bad config/env var, failing readiness/liveness probe,
+              missing dependency (DB/secret), or OOMKill (cross-check with HighPodMemory).
+            runbook_url: "https://runbooks.example.internal/PodCrashLooping"
+
+    - name: node-alerts
+      rules:
+        - alert: NodeDiskPressure
+          expr: |
+            kube_node_status_condition{condition="DiskPressure", status="true"} == 1
+          for: 5m
+          labels:
+            severity: critical
+            team: infra
+          annotations:
+            summary: "Node {{ $labels.node }} reports DiskPressure"
+            description: >-
+              The kubelet on node {{ $labels.node }} has set the DiskPressure condition, meaning available
+              disk space or inodes are below the eviction threshold. New pods will not be scheduled here and
+              the kubelet may start evicting existing pods.
+            fix: >-
+              `kubectl describe node {{ $labels.node }}` to see the exact threshold breached, then SSH in
+              and check `df -h` / `du -sh /var/lib/docker /var/lib/kubelet`. Clean up unused images with
+              `crictl rmi --prune`, or increase the node's disk size / attach additional storage.
+            runbook_url: "https://runbooks.example.internal/NodeDiskPressure"
+
+        - alert: KubeNodeNotReady
+          expr: |
+            kube_node_status_condition{condition="Ready", status="true"} == 0
+          for: 10m
+          labels:
+            severity: critical
+            team: infra
+          annotations:
+            summary: "Node {{ $labels.node }} has been NotReady for 10m"
+            description: "Node {{ $labels.node }} is not in Ready state. Workloads on it may be unschedulable or evicted."
+            fix: >-
+              Check `kubectl describe node {{ $labels.node }}` for conditions/events, and verify kubelet is
+              running (`systemctl status kubelet`) and the node has network connectivity to the control plane.
+            runbook_url: "https://runbooks.example.internal/KubeNodeNotReady"
+
+    - name: application-alerts
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m])) by (namespace, service)
+              / sum(rate(http_requests_total[5m])) by (namespace, service)
+              > 0.05
+          for: 5m
+          labels:
+            severity: critical
+            team: app-owners
+          annotations:
+            summary: "{{ $labels.service }} in {{ $labels.namespace }} has a 5xx error rate above 5%"
+            description: >-
+              More than 5% of requests to {{ $labels.service }} have returned a 5xx status code over the
+              last 5 minutes.
+            fix: >-
+              Check recent deploys (`kubectl rollout history deployment/{{ $labels.service }} -n {{ $labels.namespace }}`),
+              tail logs in Loki (`{namespace="{{ $labels.namespace }}", app="{{ $labels.service }}"} |= "error"`),
+              and check upstream dependency health. Roll back the last deploy if it correlates with the spike.
+            runbook_url: "https://runbooks.example.internal/HighErrorRate"
+
+        - alert: CertificateExpiringSoon
+          expr: |
+            certmanager_certificate_expiration_timestamp_seconds - time() < 7 * 86400
+          for: 1h
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "TLS certificate {{ $labels.namespace }}/{{ $labels.name }} expires in under 7 days"
+            description: >-
+              cert-manager reports certificate {{ $labels.name }} in namespace {{ $labels.namespace }}
+              expiring in less than 7 days.
+            fix: >-
+              `kubectl describe certificate {{ $labels.name }} -n {{ $labels.namespace }}` to check the last
+              renewal attempt and any ACME/issuer errors. Force a retry with
+              `kubectl annotate certificate {{ $labels.name }} -n {{ $labels.namespace }} cert-manager.io/issue-temporary-certificate-=true --overwrite`
+              or delete the associated CertificateRequest to trigger reissuance.
+            runbook_url: "https://runbooks.example.internal/CertificateExpiringSoon"
+
+        - alert: KubePodNotReady
+          expr: |
+            sum by (namespace, pod) (kube_pod_status_phase{phase=~"Pending|Unknown"}) > 0
+          for: 15m
+          labels:
+            severity: warning
+            team: app-owners
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} has been in a non-ready phase for 15m"
+            description: "Pod has been stuck Pending/Unknown for over 15 minutes — likely a scheduling or image pull issue."
+            fix: >-
+              `kubectl describe pod {{ $labels.pod }} -n {{ $labels.namespace }}` and check Events for
+              FailedScheduling (insufficient resources/taints) or ImagePullBackOff (bad image tag/registry auth).
+            runbook_url: "https://runbooks.example.internal/KubePodNotReady"

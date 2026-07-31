@@ -1,0 +1,85 @@
+# Helm values for Tempo (distributed tracing)
+# Chart: grafana/tempo (single-binary) — use grafana/tempo-distributed
+# instead once you outgrow single-binary throughput (see README Scaling).
+# Usage: helm upgrade --install tempo grafana/tempo -n monitoring -f values.yaml
+
+fullnameOverride: tempo
+
+tempo:
+  retention: 240h   # 10 days of trace data; tune to cost/compliance needs
+
+  # --- Receivers ---------------------------------------------------
+  # OTLP is the recommended path for anything new — instrument apps with
+  # the OpenTelemetry SDK and point the exporter at the OTLP endpoints
+  # below. Jaeger/Zipkin receivers are enabled too for legacy instrumentation.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: 0.0.0.0:14268
+        grpc:
+          endpoint: 0.0.0.0:14250
+    zipkin:
+      endpoint: 0.0.0.0:9411
+
+  # --- Storage -------------------------------------------------------
+  # local (filesystem/PVC) for small deployments; swap to S3 for
+  # anything durable / multi-replica.
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      # backend: s3
+      # s3:
+      #   bucket: my-org-tempo-traces
+      #   endpoint: s3.us-east-1.amazonaws.com
+      #   region: us-east-1
+      #   # Credentials via IRSA/Workload Identity preferred; if static keys
+      #   # are unavoidable, source via existingSecret, never inline here.
+      wal:
+        path: /var/tempo/wal
+
+  # Metrics generator turns spans into RED-method metrics (request rate,
+  # error rate, duration) and a service graph, pushed to Prometheus via
+  # remote_write — this is what powers Grafana's "Service Map" panel.
+  metricsGenerator:
+    enabled: true
+    remoteWriteUrl: "http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write"
+
+persistence:
+  enabled: true
+  storageClassName: gp3
+  size: 20Gi
+  accessModes:
+    - ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+# Expose OTLP ports on the Service so app pods across the cluster can send
+# spans directly (grpc: 4317, http: 4318).
+service:
+  type: ClusterIP
+  ports:
+    otlp-grpc: 4317
+    otlp-http: 4318
+    jaeger-grpc: 14250
+    jaeger-thrift-http: 14268
+    zipkin: 9411

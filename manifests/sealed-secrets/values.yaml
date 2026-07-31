@@ -1,0 +1,52 @@
+# Helm values for bitnami-labs/sealed-secrets
+# Install with:
+#   helm upgrade --install sealed-secrets sealed-secrets \
+#     --repo https://bitnami-labs.github.io/sealed-secrets \
+#     --namespace kube-system \
+#     -f manifests/sealed-secrets/values.yaml
+fullnameOverride: sealed-secrets-controller
+
+replicaCount: 1   # controller holds the decryption keypair; only one active instance reconciles at a time
+
+image:
+  repository: docker.io/bitnami/sealed-secrets-controller
+  tag: v0.27.1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Keep old sealing keys around after rotation so previously-sealed
+# SealedSecrets already stored in Git can still be decrypted.
+keyrenewperiod: "720h"   # 30 days; controller auto-generates a new key on this cadence, keeps old ones
+
+podDisruptionBudget:
+  enabled: false   # single replica; PDB with minAvailable:1 would block all voluntary evictions
+
+metrics:
+  serviceMonitor:
+    enabled: true
+    namespace: kube-system
+    labels:
+      release: prometheus
+
+# Back up the controller's TLS keypair (Secret: sealed-secrets-keyXXXXX in
+# the controller's namespace) outside the cluster — losing it makes every
+# previously-sealed SealedSecret permanently undecryptable.

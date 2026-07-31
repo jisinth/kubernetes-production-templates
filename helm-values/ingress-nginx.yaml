@@ -1,0 +1,128 @@
+# Helm values for ingress-nginx/ingress-nginx
+# Install with:
+#   helm upgrade --install ingress-nginx ingress-nginx \
+#     --repo https://kubernetes.github.io/ingress-nginx \
+#     --namespace ingress-nginx --create-namespace \
+#     -f helm-values/ingress-nginx.yaml
+controller:
+  replicaCount: 3
+
+  image:
+    # Pin a specific digest/tag in production instead of floating "latest".
+    registry: registry.k8s.io
+    image: ingress-nginx/controller
+    tag: "v1.11.3"
+    digest: ""
+
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true
+    controllerValue: "k8s.io/ingress-nginx"
+
+  # Spread controller pods across nodes/zones for HA.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/component
+                  operator: In
+                  values:
+                    - controller
+            topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: controller
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  # PodDisruptionBudget so voluntary evictions (node drains, cluster upgrades)
+  # can't take out all controller pods at once.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  service:
+    enabled: true
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    annotations: {}
+      # AWS example:
+      # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+      # GCP example:
+      # cloud.google.com/l4-rbs: "enabled"
+    ports:
+      http: 80
+      https: 443
+
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      namespace: ingress-nginx
+      additionalLabels:
+        release: prometheus
+      interval: 30s
+
+  config:
+    # Real-client IP handling behind an L4 LoadBalancer.
+    use-forwarded-headers: "true"
+    proxy-body-size: "16m"
+    ssl-redirect: "true"
+    enable-brotli: "true"
+    hsts: "true"
+    hsts-max-age: "31536000"
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: 10254
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 5
+
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: 10254
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  admissionWebhooks:
+    enabled: true
+    patch:
+      enabled: true
+
+defaultBackend:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 20Mi
+    limits:
+      cpu: 50m
+      memory: 64Mi

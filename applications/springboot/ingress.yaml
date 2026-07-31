@@ -1,0 +1,33 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: springboot-app
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    # Actuator endpoints should never be exposed publicly; block them at
+    # the ingress layer as defense-in-depth even though Spring Security
+    # should also restrict /actuator/** internally.
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location ~* ^/actuator/(?!health) { deny all; return 404; }
+  labels:
+    app.kubernetes.io/name: springboot-app
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: springboot-app-tls
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /svc
+            pathType: Prefix
+            backend:
+              service:
+                name: springboot-app
+                port:
+                  name: http

@@ -1,0 +1,21 @@
+# pvc.yaml — user-uploaded file storage
+#
+# ReadWriteOnce is sufficient because each replica writes files with a
+# unique name (e.g. UUID-prefixed) and the app should be treating uploads
+# as ephemeral/cache — durable storage belongs in object storage (S3/GCS).
+# This PVC exists for reference deployments that need local disk staging
+# before pushing to object storage.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nodejs-api-uploads
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nodejs-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 10Gi

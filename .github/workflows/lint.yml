@@ -1,0 +1,57 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint manifests/
+        run: yamllint -d "{extends: default, rules: {line-length: {max: 200}}}" manifests/
+
+      - name: Lint helm-values/
+        run: yamllint -d "{extends: default, rules: {line-length: {max: 200}}}" helm-values/
+
+  helm-lint:
+    name: helm lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.4"
+
+      - name: Lint chart-like directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' chart; do
+            found=1
+            dir=$(dirname "$chart")
+            echo "::group::helm lint $dir"
+            helm lint "$dir"
+            echo "::endgroup::"
+          done < <(find . -name "Chart.yaml" -print0)
+          if [ "$found" -eq 0 ]; then
+            echo "No Helm charts found, nothing to lint."
+          fi

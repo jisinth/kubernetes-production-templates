@@ -1,0 +1,91 @@
+# Helm values for Velero
+# Chart: vmware-tanzu/velero
+# Usage: helm upgrade --install velero vmware-tanzu/velero \
+#          -n velero --create-namespace -f values.yaml
+#
+# This example targets the AWS S3 object-store plugin. Swap the
+# configuration/credentials blocks for velero-plugin-for-microsoft-azure or
+# velero-plugin-for-gcp if you're on AKS/GKE — the Schedule/BackupStorageLocation
+# CRs in this folder are provider-agnostic.
+
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.9.2
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+# Credentials for the object-store plugin. In practice, do NOT inline a
+# static access key/secret here — either:
+#   1. Use IRSA (EKS) / Workload Identity (GKE) / AAD Pod Identity (AKS) and
+#      set credentials.useSecret: false, or
+#   2. Seal the generated credentials-velero file with sealed-secrets before
+#      committing anything derived from it.
+credentials:
+  useSecret: true
+  existingSecret: velero-s3-credentials
+  # secretContents:
+  #   cloud: |
+  #     [default]
+  #     aws_access_key_id = REPLACE_ME
+  #     aws_secret_access_key = REPLACE_ME
+
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: REPLACE_ME-velero-backups
+      config:
+        region: us-east-1
+        # s3ForcePathStyle: "true"      # needed for MinIO/on-prem S3-compatible stores
+        # s3Url: https://minio.example.internal  # only for non-AWS S3-compatible endpoints
+
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: us-east-1
+
+  # Backs up the contents of PVs that CSI snapshots can't cover, or when no
+  # snapshot provider is configured. Uses restic/kopia under the hood.
+  features: EnableCSI
+
+deployNodeAgent: true
+nodeAgent:
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Install the default daily Schedule via the chart, or apply
+# backup-schedule.yaml separately — don't do both (duplicate schedules).
+schedules:
+  daily-full-backup:
+    disabled: true # set to false if you'd rather manage the schedule via values
+    schedule: "0 2 * * *"
+    template:
+      ttl: "720h" # 30 days
+      includedNamespaces:
+        - "*"
+      excludedNamespaces:
+        - kube-system
+        - kube-node-lease
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: kube-prometheus-stack

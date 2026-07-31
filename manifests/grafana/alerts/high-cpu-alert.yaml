@@ -1,0 +1,70 @@
+# Grafana unified alerting: file-based provisioning format.
+# Mount this under /etc/grafana/provisioning/alerting/high-cpu-alert.yaml
+# (e.g. via a ConfigMap + volume mount, or the k8s-sidecar with
+# folder: /etc/grafana/provisioning/alerting) and Grafana loads it on
+# startup / config reload. See manifests/grafana/alerts/README.md for when
+# to use this vs. a Prometheus PrometheusRule.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: node-resource-alerts
+    folder: Infrastructure
+    interval: 1m
+    rules:
+      - uid: high-cpu-node-grafana
+        title: HighNodeCPU (Grafana-managed)
+        condition: C
+        for: 10m
+        # `data` is a pipeline: A queries Prometheus, B reduces the time
+        # series to a single value (last), C is the threshold check that
+        # becomes the alert condition.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              expr: 'node:node_cpu_utilisation:rate5m'
+              instant: false
+              range: true
+              refId: A
+          - refId: B
+            datasourceUid: "-100"   # "-100" = Grafana's built-in "expression" pseudo-datasource
+            model:
+              type: reduce
+              reducer: last
+              expression: A
+              refId: B
+          - refId: C
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0.85]
+              refId: C
+        noDataState: NoData
+        execErrState: Alerting
+        labels:
+          severity: warning
+          team: infra
+          source: grafana-unified-alerting
+        annotations:
+          summary: "Node {{ $labels.node }} CPU utilisation above 85% for 10m"
+          description: >-
+            Grafana-managed alert (mirrors the intent of the Prometheus-native
+            NodeDiskPressure/HighPodMemory rules in
+            manifests/prometheus/alert-rules.yaml, shown here as a
+            provisioning-format example) — node {{ $labels.node }} has
+            averaged over 85% CPU utilisation for the last 10 minutes.
+          runbook_url: "https://runbooks.example.internal/HighNodeCPU"
+
+# Notification routing: point Grafana's own notification policies at the
+# same Alertmanager used by Prometheus (recommended) rather than
+# maintaining two separate contact-point trees. Configure via
+# grafana.ini [unified_alerting.alertmanager] or the
+# alerting/notification-policies provisioning file.

@@ -1,0 +1,50 @@
+# PrometheusRule: recording rules that pre-aggregate expensive queries.
+# These back the HighErrorRate alert and the Grafana dashboards in
+# manifests/grafana/dashboards/ — querying job:*:rate5m directly is far
+# cheaper than re-summing raw http_requests_total at dashboard-refresh time.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: general-recording-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+    role: recording-rules
+spec:
+  groups:
+    - name: http-request-aggregations
+      interval: 30s
+      rules:
+        - record: namespace_service:http_requests:rate5m
+          expr: |
+            sum(rate(http_requests_total[5m])) by (namespace, service)
+
+        - record: namespace_service:http_requests_errors:rate5m
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m])) by (namespace, service)
+
+        - record: namespace_service:http_error_ratio:rate5m
+          expr: |
+            namespace_service:http_requests_errors:rate5m
+              / namespace_service:http_requests:rate5m
+
+    - name: http-latency-aggregations
+      interval: 30s
+      rules:
+        - record: namespace_service:http_request_duration_seconds:p99_5m
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum(rate(http_request_duration_seconds_bucket[5m])) by (namespace, service, le)
+            )
+
+    - name: node-resource-aggregations
+      interval: 30s
+      rules:
+        - record: node:node_cpu_utilisation:rate5m
+          expr: |
+            1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (node)
+
+        - record: node:node_memory_utilisation:ratio
+          expr: |
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)

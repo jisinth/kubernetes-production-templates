@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: flask-app
+  namespace: default
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "35"
+  labels:
+    app.kubernetes.io/name: flask-app
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: flask-app-tls
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /flask
+            pathType: Prefix
+            backend:
+              service:
+                name: flask-app
+                port:
+                  name: http

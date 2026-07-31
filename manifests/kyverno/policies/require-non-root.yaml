@@ -1,0 +1,70 @@
+# Requires pods to run as a non-root user, at both the pod and container
+# level. This overlaps with (and can replace, if you don't want to run a
+# separate PSA controller) the "restricted" Pod Security Standard's
+# runAsNonRoot requirement — see manifests/pod-security/.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root-user
+  annotations:
+    policies.kyverno.io/title: Require Non-Root User
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Requires runAsNonRoot: true at the pod or container securityContext
+      level so no container in the pod can run as UID 0. Pair with
+      manifests/pod-security/restricted-example.yaml for a fully compliant
+      pod spec.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-runasnonroot
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+      validate:
+        message: >-
+          Running as root is disallowed. Set
+          spec.securityContext.runAsNonRoot=true (pod-level) or set it on
+          every container's securityContext, and ensure runAsUser (if set)
+          is not 0.
+        anyPattern:
+          - spec:
+              securityContext:
+                runAsNonRoot: true
+          - spec:
+              containers:
+                - securityContext:
+                    runAsNonRoot: true
+    - name: check-runasuser-not-root
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno
+      validate:
+        message: >-
+          securityContext.runAsUser must not be 0 (root) at the pod or
+          container level.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.securityContext.runAsUser || `-1` }}"
+                operator: Equals
+                value: 0

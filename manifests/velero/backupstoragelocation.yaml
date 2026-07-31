@@ -1,0 +1,28 @@
+# BackupStorageLocation tells Velero where to write backup metadata and
+# resource manifests (the object-store bucket). This is separate from
+# VolumeSnapshotLocation, which controls where PV *data* snapshots land.
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: default
+  namespace: velero
+spec:
+  provider: aws
+  objectStorage:
+    bucket: REPLACE_ME-velero-backups
+    # Optional: prefix backups from this cluster if multiple clusters share
+    # one bucket.
+    prefix: prod-cluster-01
+  config:
+    region: us-east-1
+    # Uncomment for MinIO or another S3-compatible on-prem store:
+    # s3ForcePathStyle: "true"
+    # s3Url: https://minio.example.internal
+  credential:
+    name: velero-s3-credentials
+    key: cloud
+  # Velero periodically re-validates that the bucket is reachable; a stale
+  # "Unavailable" phase almost always means credentials or network policy,
+  # not the schedule itself.
+  default: true
+  accessMode: ReadWrite

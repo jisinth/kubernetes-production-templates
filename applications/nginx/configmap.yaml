@@ -1,0 +1,74 @@
+# configmap.yaml — nginx runtime config
+#
+# nginx.conf is mounted directly over /etc/nginx/nginx.conf. It listens on
+# 8080 (non-privileged port, required because the container runs as
+# non-root uid 101) and serves static files with sane caching + gzip.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-web-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nginx-web
+data:
+  NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+  nginx.conf: |
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      include       /etc/nginx/mime.types;
+      default_type  application/octet-stream;
+
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path       /tmp/proxy_temp;
+      fastcgi_temp_path     /tmp/fastcgi_temp;
+      uwsgi_temp_path       /tmp/uwsgi_temp;
+      scgi_temp_path        /tmp/scgi_temp;
+
+      log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" '
+                       '"$http_user_agent" $request_time';
+
+      access_log /dev/stdout main;
+      error_log  /dev/stderr warn;
+
+      sendfile           on;
+      tcp_nopush         on;
+      keepalive_timeout  65;
+      gzip               on;
+      gzip_comp_level    5;
+      gzip_types         text/plain text/css application/javascript application/json
+                         image/svg+xml application/xml+rss;
+
+      server {
+        listen 8080;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        location = /healthz {
+          access_log off;
+          return 200 "ok\n";
+          add_header Content-Type text/plain;
+        }
+
+        location / {
+          try_files $uri $uri/ /index.html;
+          add_header Cache-Control "public, max-age=300";
+        }
+
+        location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?)$ {
+          expires 30d;
+          add_header Cache-Control "public, immutable";
+        }
+
+        location ~ /\. {
+          deny all;
+        }
+      }
+    }

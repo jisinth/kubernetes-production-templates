@@ -1,0 +1,90 @@
+# Standalone example: a focused team-based routing tree.
+#
+# This is the same `route:`/`receivers:` schema as manifests/alertmanager/
+# config.yaml (Alertmanager doesn't support splitting config across
+# multiple files natively) — this file exists on its own purely to
+# document and reason about the routing-tree pattern in isolation. To use
+# it, merge its `route`/`receivers` blocks into config.yaml rather than
+# applying both files as separate configs.
+#
+# Goal: every alert reaches exactly one team's Slack channel by default
+# (via the `team` label, which every PrometheusRule/alert in this repo
+# should set — see manifests/prometheus/alert-rules.yaml), with a
+# cluster-wide fallback for anything unlabeled, and critical alerts always
+# additionally paging on-call regardless of team.
+route:
+  receiver: fallback-unrouted
+  group_by: ["alertname", "namespace"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Always page on-call for critical severity, regardless of team —
+    # evaluated first (Alertmanager routes top-to-bottom, first match per
+    # branch) and `continue: true` lets it also fall through to the
+    # team-specific branch below.
+    - matchers:
+        - severity="critical"
+      receiver: pagerduty-oncall
+      continue: true
+
+    # --- Team ownership routing ---------------------------------------
+    - matchers:
+        - team="platform"
+      receiver: slack-platform
+
+    - matchers:
+        - team="infra"
+      receiver: slack-infra
+
+    - matchers:
+        - team="app-owners"
+      receiver: slack-app-owners
+
+    # Sub-route: within app-owners, payments-related alerts also go to a
+    # dedicated payments channel (demonstrates nested routing).
+    - matchers:
+        - team="app-owners"
+        - service=~"payments.*"
+      receiver: slack-payments
+      continue: true
+
+receivers:
+  - name: fallback-unrouted
+    slack_configs:
+      - channel: "#alerts-unrouted"
+        send_resolved: true
+        text: >-
+          :warning: This alert has no `team` label set — add one to its
+          PrometheusRule so it routes correctly. {{ .CommonAnnotations.summary }}
+
+  - name: pagerduty-oncall
+    pagerduty_configs:
+      - service_key: "<REPLACE_ME_PAGERDUTY_INTEGRATION_KEY>"
+        send_resolved: true
+
+  - name: slack-platform
+    slack_configs:
+      - channel: "#team-platform-alerts"
+        send_resolved: true
+
+  - name: slack-infra
+    slack_configs:
+      - channel: "#team-infra-alerts"
+        send_resolved: true
+
+  - name: slack-app-owners
+    slack_configs:
+      - channel: "#team-app-alerts"
+        send_resolved: true
+
+  - name: slack-payments
+    slack_configs:
+      - channel: "#team-payments-alerts"
+        send_resolved: true
+
+# Tip: validate any change to a routing tree with `amtool config routes
+# test` (see README.md Useful Commands) against a handful of representative
+# label sets before applying — a misplaced `continue: true` or matcher
+# typo silently drops alerts into the wrong (or no) receiver.

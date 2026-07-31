@@ -1,0 +1,86 @@
+# Helm values for jetstack/cert-manager
+# Install with:
+#   helm upgrade --install cert-manager cert-manager \
+#     --repo https://charts.jetstack.io \
+#     --namespace cert-manager --create-namespace \
+#     -f helm-values/cert-manager.yaml
+installCRDs: true
+
+replicaCount: 2
+
+image:
+  repository: quay.io/jetstack/cert-manager-controller
+  tag: "v1.15.3"
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Spread the controller across nodes for HA; it holds a leader-election lock
+# so only one replica is active at a time, the rest are hot standby.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values:
+                  - cert-manager
+          topologyKey: kubernetes.io/hostname
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: true
+    prometheusInstance: default
+    interval: 60s
+    labels:
+      release: prometheus
+
+webhook:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+cainjector:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# Global settings passed through to the controller as --cluster-resource-namespace, etc.
+extraArgs:
+  - --dns01-recursive-nameservers-only=false

@@ -1,0 +1,18 @@
+# Let's Encrypt STAGING issuer. Use this first when testing — the staging
+# ACME server has much higher rate limits but issues certificates that
+# browsers do NOT trust. Once your Ingress/challenge flow is verified here,
+# switch to cluster-issuer-letsencrypt-prod.yaml.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: platform-team@example.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

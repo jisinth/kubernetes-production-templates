@@ -1,0 +1,67 @@
+# Daily cluster backup. Velero creates a new Backup object from this
+# template every time the cron schedule fires; each Backup expires (and is
+# garbage-collected, including its data in object storage) after `ttl`.
+#
+# RPO/RTO targets and retention rationale live in manifests/backup/README.md
+# — this manifest is the mechanism, that doc is the policy.
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-full-backup
+  namespace: velero
+spec:
+  schedule: "0 2 * * *" # 02:00 UTC daily — low-traffic window, adjust per cluster
+  useOwnerReferencesInBackup: false
+  template:
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+
+    ttl: 720h0m0s # 30 days retention
+
+    includedNamespaces:
+      - "*"
+    excludedNamespaces:
+      - kube-system
+      - kube-node-lease
+      - kube-public
+
+    # Snapshot PV data via CSI/volume snapshotter as well as object metadata.
+    snapshotVolumes: true
+    defaultVolumesToFsBackup: false
+
+    # Pause application writes for consistency where supported, via
+    # pre/post hooks configured per-workload with pod annotations, e.g.:
+    #   pre.hook.backup.velero.io/command
+    #   pre.hook.backup.velero.io/container
+    hooks: {}
+
+    labelSelector: {}
+
+    # Skip cluster-scoped resources that are re-created by other controllers
+    # (e.g., Kyverno-generated resources) to avoid restore-time conflicts.
+    excludedResources:
+      - events
+      - events.events.k8s.io
+---
+# Weekly backup with a longer retention window, for point-in-time recovery
+# further back than the 30-day daily window covers.
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: weekly-full-backup
+  namespace: velero
+spec:
+  schedule: "0 3 * * 0" # 03:00 UTC every Sunday
+  template:
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    ttl: 2160h0m0s # 90 days retention
+    includedNamespaces:
+      - "*"
+    excludedNamespaces:
+      - kube-system
+      - kube-node-lease
+      - kube-public
+    snapshotVolumes: true

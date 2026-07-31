@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: python-app-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: python-app
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  WORKERS: "4"
+  WORKER_TIMEOUT_SECONDS: "60"
+  CACHE_DIR: "/app/cache"
+  CACHE_TTL_SECONDS: "3600"
+  FEATURE_FLAG_ASYNC_JOBS: "true"

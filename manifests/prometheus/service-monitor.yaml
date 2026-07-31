@@ -1,0 +1,61 @@
+# Example ServiceMonitor: scrapes a sample application exposing Prometheus
+# metrics on /metrics. Drop a copy of this next to your own app's manifests
+# and adjust matchLabels/port/path — the Prometheus Operator will discover
+# it automatically as long as it lives in a namespace covered by
+# serviceMonitorNamespaceSelector (set to {} / all-namespaces in
+# manifests/prometheus/values.yaml).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sample-app
+  namespace: default
+  labels:
+    # Matches ruleSelector/serviceMonitorSelector conventions used across
+    # this repo so the Operator's default "release: kube-prometheus-stack"
+    # requirement (if you re-enable selector scoping) still picks this up.
+    release: kube-prometheus-stack
+    app.kubernetes.io/name: sample-app
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sample-app
+  namespaceSelector:
+    matchNames:
+      - default
+  endpoints:
+    - port: http-metrics        # must match a named port on the target Service
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true
+      relabelings:
+        # Keep the pod name as a label for easier debugging in Grafana/Loki
+        # correlation views.
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+      metricRelabelings:
+        # Drop high-cardinality per-request-id metrics before they ever hit
+        # local TSDB — cheaper than dropping them at query time.
+        - sourceLabels: [__name__]
+          regex: "sample_app_request_id_.*"
+          action: drop
+---
+# The Service the ServiceMonitor above selects. Included for completeness —
+# your application manifests likely already define something like this.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-app
+  namespace: default
+  labels:
+    app.kubernetes.io/name: sample-app
+spec:
+  selector:
+    app.kubernetes.io/name: sample-app
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

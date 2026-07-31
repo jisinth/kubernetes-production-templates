@@ -1,0 +1,55 @@
+# Argo CD RBAC policy, applied as the argocd-rbac-cm ConfigMap.
+# This is the same policy carried in values.yaml's configs.rbac block — kept
+# here too as a standalone, kubectl-apply-able reference and for clusters
+# bootstrapped without Helm.
+#
+# Policy CSV grammar: p, subject, resource, action, object, effect
+#   resource: applications | applicationsets | clusters | repositories |
+#             certificates | projects | accounts | gpgkeys | logs | exec
+#   subject : role:<name>  or  a group name (mapped in via SSO claims)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-rbac-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  # Deny by default; every subject must be explicitly granted a role below.
+  policy.default: role:readonly
+
+  policy.csv: |
+    # --- role:admin (built-in, full access) --------------------------
+    # Nothing to declare — role:admin is a built-in wildcard role.
+
+    # --- role:readonly (built-in, view-only) --------------------------
+    # Nothing to declare — role:readonly is a built-in wildcard role.
+
+    # --- role:developer ------------------------------------------------
+    # Can view, sync, and read logs for apps in the "platform" and
+    # "applications" projects, but cannot edit Application specs, delete
+    # apps, manage repositories/clusters, or touch RBAC/projects.
+    p, role:developer, applications, get, platform/*, allow
+    p, role:developer, applications, get, applications/*, allow
+    p, role:developer, applications, sync, platform/*, allow
+    p, role:developer, applications, sync, applications/*, allow
+    p, role:developer, applications, action/*, applications/*, allow
+    p, role:developer, logs, get, platform/*, allow
+    p, role:developer, logs, get, applications/*, allow
+    p, role:developer, exec, create, applications/*, deny
+
+    # --- role:ci-bot -----------------------------------------------------
+    # Service-account role used by CI pipelines to trigger syncs only.
+    p, role:ci-bot, applications, get, */*, allow
+    p, role:ci-bot, applications, sync, */*, allow
+
+    # --- Group bindings (from OIDC/SSO group claims, see dex config) -----
+    g, argocd-admins, role:admin
+    g, platform-team, role:admin
+    g, developers, role:developer
+    g, viewers, role:readonly
+
+  # Group-scoped tokens (used by `argocd account generate-token` for the
+  # ci-bot role above) must set scopes so JWTs carry group claims.
+  scopes: "[groups]"

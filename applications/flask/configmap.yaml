@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flask-app-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: flask-app
+data:
+  FLASK_ENV: "production"
+  FLASK_DEBUG: "0"
+  FLASK_APP: "wsgi:app"
+  APP_CONFIG: "config.ProductionConfig"
+  LOG_LEVEL: "INFO"
+  INSTANCE_PATH: "/app/instance"
+  SESSION_COOKIE_SECURE: "true"
+  SESSION_COOKIE_HTTPONLY: "true"
+  PREFERRED_URL_SCHEME: "https"
+  MAX_CONTENT_LENGTH: "5242880"

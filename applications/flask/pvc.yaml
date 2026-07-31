@@ -1,0 +1,22 @@
+# pvc.yaml — Flask instance folder
+#
+# Flask's "instance" folder conventionally holds per-deployment data not
+# meant for version control (SQLite files for local/dev use, uploaded
+# files, generated config). ReadWriteOnce is appropriate since this is
+# tied to a single replica's local state; for anything that must be
+# shared/durable across replicas, use a real database or object storage
+# instead of SQLite-on-PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flask-app-instance
+  namespace: default
+  labels:
+    app.kubernetes.io/name: flask-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 5Gi

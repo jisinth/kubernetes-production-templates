@@ -1,0 +1,92 @@
+# Helm values for metrics-server/metrics-server
+# Install with:
+#   helm upgrade --install metrics-server metrics-server \
+#     --repo https://kubernetes-sigs.github.io/metrics-server \
+#     --namespace kube-system \
+#     -f manifests/metrics-server/values.yaml
+replicas: 2
+
+image:
+  repository: registry.k8s.io/metrics-server/metrics-server
+  tag: v0.7.2
+  pullPolicy: IfNotPresent
+
+args:
+  - --cert-dir=/tmp
+  - --secure-port=10250
+  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+  - --kubelet-use-node-status-port
+  - --metric-resolution=15s
+  # Prefer real kubelet certificate verification. Only add
+  # --kubelet-insecure-tls on clusters where kubelet serving certs aren't
+  # signed by a CA metrics-server trusts (common on some managed/bare-metal
+  # setups) — treat it as a stopgap, not a default:
+  # - --kubelet-insecure-tls
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 100Mi
+  limits:
+    cpu: 200m
+    memory: 250Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - metrics-server
+          topologyKey: kubernetes.io/hostname
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+livenessProbe:
+  httpGet:
+    path: /livez
+    port: https
+    scheme: HTTPS
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: https
+    scheme: HTTPS
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  failureThreshold: 3
+
+apiService:
+  create: true
+
+metrics:
+  enabled: true
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  additionalLabels:
+    release: prometheus

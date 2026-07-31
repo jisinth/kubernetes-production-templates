@@ -1,0 +1,30 @@
+# Allows every pod in the namespace to reach kube-dns/CoreDNS for name
+# resolution. Required as soon as default-deny-all.yaml is applied — DNS is
+# egress traffic too, and without this rule every pod's DNS lookups start
+# timing out even though the pod itself looks healthy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: default
+spec:
+  podSelector: {} # every pod in the namespace needs DNS
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # Restrict to the kube-system namespace and the kube-dns/CoreDNS
+        # pods specifically, rather than allowing all egress on port 53
+        # (which would also permit exfiltration over DNS to arbitrary
+        # external resolvers).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

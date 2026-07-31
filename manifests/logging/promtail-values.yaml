@@ -1,0 +1,56 @@
+# Helm values for Promtail (log shipper: node DaemonSet -> Loki)
+# Chart: grafana/promtail
+# Usage: helm upgrade --install promtail grafana/promtail \
+#          -n logging --create-namespace -f promtail-values.yaml
+#
+# Ships every container's stdout/stderr from every node to Loki
+# (see ../loki/ for the Loki deployment this points at). Grafana Agent in
+# "logs" mode is a drop-in alternative to Promtail if you'd rather run one
+# agent for both metrics and logs — same target, different chart.
+
+config:
+  clients:
+    - url: http://loki-gateway.loki.svc.cluster.local/loki/api/v1/push
+      # If Loki's gateway sits behind basic auth or a multi-tenant proxy,
+      # add: tenant_id, basic_auth.username/password (from a Secret, not
+      # inlined here).
+
+  snippets:
+    pipelineStages:
+      - cri: {} # parse CRI-formatted container log lines (containerd/CRI-O default)
+      # Drop noisy, low-value log lines before they ever reach Loki —
+      # cheaper than filtering at query time.
+      - match:
+          selector: '{namespace="kube-system"}'
+          stages:
+            - drop:
+                expression: ".*Liveness probe failed.*"
+
+  # Label logs with the same metadata Prometheus uses for metrics
+  # (namespace, pod, container, node) so Grafana can pivot between metrics
+  # and logs for the same workload using consistent label names.
+  extraRelabelConfigs:
+    - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+      target_label: app
+    - source_labels: [__meta_kubernetes_namespace]
+      target_label: namespace
+    - source_labels: [__meta_kubernetes_pod_node_name]
+      target_label: node
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Promtail must run on every node to tail every node's container logs.
+tolerations:
+  - effect: NoSchedule
+    operator: Exists
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack

@@ -1,0 +1,26 @@
+# Example Certificate resource. Most of the time you don't need this at
+# all — annotating an Ingress with cert-manager.io/cluster-issuer is enough
+# and cert-manager creates a Certificate for you automatically. Create one
+# explicitly when you need a cert independent of any single Ingress (e.g.
+# for mTLS between internal services, or to pre-provision before the
+# Ingress exists).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app-example-com-tls
+  namespace: production
+spec:
+  secretName: app-example-com-tls
+  duration: 2160h    # 90 days (Let's Encrypt max lifetime)
+  renewBefore: 360h  # renew 15 days before expiry
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  dnsNames:
+    - app.example.com
+    - www.app.example.com
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+    group: cert-manager.io

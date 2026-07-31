@@ -1,0 +1,87 @@
+# A Deployment fully compliant with the "restricted" Pod Security Standard.
+# Apply this into a namespace labeled
+# pod-security.kubernetes.io/enforce: restricted (see namespace-labels.yaml)
+# to confirm it's admitted without any PSA violations.
+#
+# Restricted-tier requirements this manifest satisfies:
+#   - runAsNonRoot: true (pod AND container level)
+#   - a non-root runAsUser/runAsGroup explicitly set
+#   - allowPrivilegeEscalation: false
+#   - capabilities.drop: ["ALL"] with nothing added back
+#   - seccompProfile.type: RuntimeDefault
+#   - no hostNetwork/hostPID/hostIPC, no hostPath volumes
+#   - readOnlyRootFilesystem: true (not required by PSA itself, but a
+#     production security best practice paired with it here)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: restricted-example
+  namespace: apps-restricted
+  labels:
+    app.kubernetes.io/name: restricted-example
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: restricted-example
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: restricted-example
+    spec:
+      # Pod-level securityContext — applies as the default for every
+      # container unless a container overrides it.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      containers:
+        - name: app
+          image: gcr.io/distroless/static-debian12:nonroot
+          ports:
+            - containerPort: 8080
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # readOnlyRootFilesystem means anything the app writes at
+          # runtime (temp files, caches) needs an explicit writable
+          # volume — emptyDir is the usual choice.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/app
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}

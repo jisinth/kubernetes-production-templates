@@ -1,0 +1,113 @@
+# Alertmanager configuration: routing tree, receivers, and inhibition
+# rules. Load this via a Secret (recommended, since receiver webhook URLs
+# are sensitive) referenced by `configFromSecret` in values.yaml, or via
+# kube-prometheus-stack's `alertmanager.config` value if running the
+# Operator-managed Alertmanager instead.
+#
+# Replace every "<REPLACE_ME_...>" placeholder below with a real secret
+# pulled from your secrets manager before deploying — none of these values
+# are usable as-is.
+global:
+  resolve_timeout: 5m
+  slack_api_url: "<REPLACE_ME_SLACK_WEBHOOK_URL>"
+  # PagerDuty routing keys are set per-receiver below instead of globally.
+
+# --- Routing tree --------------------------------------------------------
+# Top-level route groups by alertname+cluster+service to avoid one alert
+# flapping into dozens of individual notifications; severity determines
+# which receiver (and how urgently) an alert is delivered.
+route:
+  receiver: default-slack
+  group_by: ["alertname", "cluster", "service"]
+  group_wait: 30s        # wait this long to buffer more alerts into the same group
+  group_interval: 5m     # minimum time between notifications for new alerts in an existing group
+  repeat_interval: 4h    # re-notify for a still-firing alert at most this often
+
+  routes:
+    # Critical alerts page immediately via PagerDuty, in addition to Slack.
+    - matchers:
+        - severity="critical"
+      receiver: pagerduty-critical
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true   # also fall through to the default Slack receiver below
+
+    - matchers:
+        - severity="critical"
+      receiver: slack-critical
+      group_wait: 10s
+
+    # Warnings go to Slack only, less urgently, deduplicated harder.
+    - matchers:
+        - severity="warning"
+      receiver: default-slack
+      repeat_interval: 12h
+
+    # Team-specific routing — see routes.yaml for a standalone, more
+    # detailed example of this pattern.
+    - matchers:
+        - team="infra"
+      receiver: slack-infra
+      continue: true
+
+    - matchers:
+        - team="app-owners"
+      receiver: slack-app-owners
+      continue: true
+
+# --- Inhibition rules ------------------------------------------------
+# Suppress lower-priority noise that's a known side-effect of a
+# higher-priority alert already firing.
+inhibit_rules:
+  # If a node is NotReady, don't also page for every pod on it being
+  # unreachable/crashlooping — the node alert already explains why.
+  - source_matchers:
+      - alertname="KubeNodeNotReady"
+    target_matchers:
+      - alertname=~"PodCrashLooping|KubePodNotReady"
+    equal: ["node"]
+
+  # A critical alert for a given alertname+service suppresses a warning
+  # for the same alertname+service (avoid double-paging for the same root
+  # cause at two severities as a metric crosses both thresholds).
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: ["alertname", "namespace", "service"]
+
+receivers:
+  - name: default-slack
+    slack_configs:
+      - channel: "#alerts-general"
+        send_resolved: true
+        title: '{{ template "slack.default.title" . }}'
+        text: '{{ template "slack.default.text" . }}'
+
+  - name: slack-critical
+    slack_configs:
+      - channel: "#alerts-critical"
+        send_resolved: true
+        icon_emoji: ":rotating_light:"
+
+  - name: slack-infra
+    slack_configs:
+      - channel: "#team-infra-alerts"
+        send_resolved: true
+
+  - name: slack-app-owners
+    slack_configs:
+      - channel: "#team-app-alerts"
+        send_resolved: true
+
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - service_key: "<REPLACE_ME_PAGERDUTY_INTEGRATION_KEY>"
+        send_resolved: true
+        severity: critical
+        description: '{{ .CommonAnnotations.summary }}'
+
+  - name: "null"   # used for alerts explicitly silenced by routing (e.g. Watchdog)
+
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"

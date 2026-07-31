@@ -1,0 +1,39 @@
+# VerticalPodAutoscaler in "Auto" mode: it observes actual CPU/memory usage
+# over time and automatically evicts + recreates pods with right-sized
+# requests/limits. Targets a different workload than hpa-example.yaml on
+# purpose — see the README "Common Problems" section for why VPA(Auto) and
+# HPA-on-CPU/memory should not target the same Deployment simultaneously
+# (they fight each other: VPA changes requests, which shifts the
+# utilization percentage HPA is scaling on).
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: batch-worker-vpa
+  namespace: default
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: batch-worker
+
+  updatePolicy:
+    # Auto: VPA evicts and recreates pods with updated resources.
+    # Alternatives: "Initial" (only sets resources at pod creation, never
+    # evicts running pods) or "Off" (recommendation-only, via
+    # status.recommendation, no mutation — the safest way to trial VPA
+    # against a workload you don't want auto-restarted yet).
+    updateMode: "Auto"
+
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        maxAllowed:
+          cpu: 2
+          memory: 4Gi
+        controlledResources:
+          - cpu
+          - memory
+        controlledValues: RequestsAndLimits

@@ -1,0 +1,87 @@
+# Tempo server configuration snippet (config.yaml). Templated in by the
+# Helm chart via the `tempo:` block in values.yaml/helm-values — this file
+# is the raw config for reference, for running Tempo outside Helm, or for
+# diffing against what the chart renders.
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9095
+  log_level: info
+
+# --- Distributor: ingests spans from every supported protocol -------
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+    jaeger:
+      protocols:
+        thrift_http:
+          endpoint: 0.0.0.0:14268
+        grpc:
+          endpoint: 0.0.0.0:14250
+    zipkin:
+      endpoint: 0.0.0.0:9411
+
+ingester:
+  max_block_duration: 5m
+  trace_idle_period: 30s
+
+compactor:
+  compaction:
+    block_retention: 240h    # 10 days; matches tempo.retention in values.yaml
+    compacted_block_retention: 1h
+
+# --- Storage ---------------------------------------------------------
+# local (filesystem) for small/eval deployments; swap to s3 for anything
+# durable across multiple replicas.
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+    # backend: s3
+    # s3:
+    #   bucket: my-org-tempo-traces
+    #   endpoint: s3.us-east-1.amazonaws.com
+    #   region: us-east-1
+
+# --- Metrics generator ------------------------------------------------
+# Derives RED metrics + a service graph from spans and remote-writes them
+# to Prometheus — powers Grafana's "Service Map"/"Node Graph" panels
+# (see tracesToMetrics/serviceMap in manifests/grafana/datasources/datasources.yaml).
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: production
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write
+        send_exemplars: true
+  processor:
+    service_graphs:
+      max_items: 10000
+      wait: 10s
+    span_metrics:
+      dimensions:
+        - http.method
+        - http.status_code
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        - service-graphs
+        - span-metrics
+    # Guard rails so one noisy service can't blow up storage/query cost.
+    ingestion:
+      rate_limit_bytes: 15000000
+      burst_size_bytes: 20000000
+    global:
+      max_bytes_per_trace: 5000000

@@ -1,0 +1,71 @@
+# Pod Security Admission (PSA) is enforced entirely through namespace
+# labels — there's no separate CRD or controller to install (it's built
+# into the API server since v1.25). Each of the three Namespace docs below
+# shows the same three-label pattern applied to a different Pod Security
+# Standard (PSS) tier, for comparison. In practice, most application
+# namespaces should use "restricted"; "baseline" is a reasonable minimum
+# for legacy workloads mid-migration; "privileged" should be reserved for
+# a small, explicitly reviewed set of platform namespaces (CNI, CSI
+# drivers, etc.) that genuinely need host access.
+#
+# Label meanings:
+#   pod-security.kubernetes.io/<mode>: <level>
+#     mode:  enforce | audit | warn
+#     level: privileged | baseline | restricted
+#   pod-security.kubernetes.io/<mode>-version: <k8s-minor-version>|latest
+#     pins (or floats) which version of the standard's rule set is applied
+---
+# --- Tier: restricted -------------------------------------------------
+# The most restrictive tier: requires runAsNonRoot, drops ALL capabilities,
+# forbids privilege escalation, requires seccompProfile, restricts volume
+# types, etc. Use this for all standard application namespaces.
+# See restricted-example.yaml for a pod spec that satisfies this tier.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps-restricted
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # audit/warn one level stricter set-up isn't meaningful above
+    # "restricted" (it's already the strictest); here they mirror enforce
+    # so any future stricter standard would show up as a warning first.
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+# --- Tier: baseline -----------------------------------------------------
+# Prevents known privilege escalations (host namespaces, hostPath volumes,
+# privileged containers) but doesn't require runAsNonRoot or a read-only
+# root filesystem. A reasonable landing spot for legacy workloads being
+# migrated toward "restricted", not a permanent home for new services.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps-baseline
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    # Warn on anything that would fail "restricted" so teams see the gap
+    # to close before their next migration wave, without blocking today.
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+# --- Tier: privileged -----------------------------------------------------
+# No restrictions at all. Reserve for a short, explicit allow-list of
+# platform namespaces that genuinely need host access (CNI, CSI node
+# drivers, node-level monitoring agents) — never for application workloads.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system-example
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    # Still worth auditing/warning even in a privileged namespace, so you
+    # notice if a workload here could actually run under a stricter tier.
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/audit-version: latest

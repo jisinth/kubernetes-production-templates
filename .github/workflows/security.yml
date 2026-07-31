@@ -1,0 +1,88 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy:
+    name: Trivy config scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy config scan (manifests)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: manifests/
+          format: sarif
+          output: trivy-manifests.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+
+      - name: Run Trivy config scan (applications)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: applications/
+          format: sarif
+          output: trivy-applications.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF (manifests)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-manifests.sarif
+          category: trivy-manifests
+
+      - name: Upload Trivy SARIF (applications)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-applications.sarif
+          category: trivy-applications
+
+  checkov:
+    name: Checkov scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Checkov (manifests)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: manifests/
+          framework: kubernetes
+          output_format: sarif
+          output_file_path: checkov-manifests.sarif
+          soft_fail: true
+
+      - name: Run Checkov (applications)
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: applications/
+          framework: kubernetes
+          output_format: sarif
+          output_file_path: checkov-applications.sarif
+          soft_fail: true
+
+      - name: Upload Checkov SARIF (manifests)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-manifests.sarif
+          category: checkov-manifests
+
+      - name: Upload Checkov SARIF (applications)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-applications.sarif
+          category: checkov-applications

@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: ingress-nginx
+  annotations:
+    # Cloud-provider annotations — uncomment the one that matches your cluster.
+    # AWS (NLB):
+    # service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    # service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    # GCP:
+    # cloud.google.com/l4-rbs: "enabled"
+    # Azure:
+    # service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: "/healthz"
+spec:
+  type: LoadBalancer
+  # Preserve the client source IP instead of SNAT'ing through the node;
+  # required for correct rate-limiting / IP allowlisting in the controller.
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: ingress-nginx
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

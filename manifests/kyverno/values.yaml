@@ -1,0 +1,69 @@
+# Helm values for Kyverno
+# Chart: kyverno/kyverno
+# Usage: helm upgrade --install kyverno kyverno/kyverno \
+#          -n kyverno --create-namespace -f values.yaml
+#
+# ClusterPolicy CRs (require-resource-limits, disallow-latest-tag,
+# require-non-root) live in ./policies/ and are applied separately after
+# the controller is up.
+
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# Spread admission-controller replicas across nodes/zones so a single node
+# failure doesn't take down policy enforcement cluster-wide.
+podAntiAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+          - key: app.kubernetes.io/component
+            operator: In
+            values:
+              - admission-controller
+      topologyKey: kubernetes.io/hostname
+
+admissionController:
+  replicas: 3
+  serviceMonitor:
+    enabled: true
+    additionalLabels:
+      release: kube-prometheus-stack
+
+backgroundController:
+  replicas: 2
+
+reportsController:
+  replicas: 1
+
+cleanupController:
+  replicas: 1
+
+# Fail-open (Ignore) by default so a Kyverno outage doesn't block the entire
+# API server. Flip to Fail (fail-closed) only once Kyverno HA + monitoring
+# is proven solid, and only for policies that are true security gates.
+webhooks:
+  failurePolicy: Ignore
+
+# Existing workloads are audited (see individual ClusterPolicy
+# validationFailureAction fields) rather than enforced on day one. Change
+# per-policy once a namespace is confirmed compliant via
+# `kubectl get policyreport -A`.
+config:
+  webhooks:
+    - namespaceSelector:
+        matchExpressions:
+          - key: kubernetes.io/metadata.name
+            operator: NotIn
+            values:
+              - kube-system
+              - kyverno
+
+crds:
+  install: true

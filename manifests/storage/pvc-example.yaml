@@ -1,0 +1,22 @@
+# Example PersistentVolumeClaim referencing the gp3 StorageClass from
+# storageclass-examples.yaml. Because gp3 uses
+# volumeBindingMode: WaitForFirstConsumer, this PVC will sit in "Pending"
+# until a pod that mounts it is actually scheduled — that's expected, not
+# a stuck provisioner.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-data
+  namespace: default
+  labels:
+    app.kubernetes.io/name: web-app
+spec:
+  accessModes:
+    - ReadWriteOnce # gp3/EBS, premium-ssd/Azure Disk, and pd-ssd/GCE PD are all
+    # single-node block storage; use a filesystem-backed
+    # ReadWriteMany class (e.g. EFS, Azure Files, Filestore) if
+    # multiple pods need concurrent write access to the same volume.
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 20Gi

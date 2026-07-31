@@ -1,0 +1,22 @@
+# pvc.yaml — application log volume
+#
+# ReadWriteOnce local disk buffer for application.log before a
+# node-level log shipper (Fluent Bit/Promtail, see ../../manifests/loki
+# and ../../manifests/logging) tails and forwards it. Prefer stdout/stderr
+# + cluster-level log aggregation over this PVC where possible; it exists
+# here to demonstrate the pattern for apps that must write structured log
+# files to disk (e.g. audit logs with rotation requirements).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: springboot-app-logs
+  namespace: default
+  labels:
+    app.kubernetes.io/name: springboot-app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 10Gi

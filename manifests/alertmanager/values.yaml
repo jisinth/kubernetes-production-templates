@@ -1,0 +1,67 @@
+# Helm values for standalone Alertmanager
+# Chart: prometheus-community/alertmanager
+#
+# NOTE: if you installed manifests/prometheus/ via kube-prometheus-stack,
+# that chart already deploys and manages its own Alertmanager (see
+# `alertmanager:` block in manifests/prometheus/values.yaml /
+# helm-values/prometheus.yaml) — you do NOT need to also install this
+# standalone chart in that case. This values.yaml is provided for:
+#   (a) reference on what Alertmanager-specific tuning looks like in
+#       isolation, and
+#   (b) teams running Alertmanager independently of kube-prometheus-stack
+#       (e.g. fronting multiple Prometheus instances/clusters with one
+#       shared Alertmanager).
+# The actual routing/receivers config in this directory (config.yaml,
+# routes.yaml) applies either way — load it into whichever Alertmanager
+# instance you run via `alertmanagerSpec.alertmanagerConfiguration` (Operator)
+# or `configmapReload`/`config` (standalone chart).
+
+fullnameOverride: alertmanager
+
+replicaCount: 3   # odd number for gossip-protocol quorum
+
+image:
+  tag: v0.27.0
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+persistentVolume:
+  enabled: true
+  storageClass: gp3
+  size: 5Gi
+  accessModes:
+    - ReadWriteOnce
+
+# Alertmanager config is loaded from manifests/alertmanager/config.yaml,
+# mounted via this chart's `config:` value (or a Secret if you prefer to
+# keep receiver webhook URLs out of the Helm release values entirely —
+# recommended, see Security section in README.md).
+configFromSecret: alertmanager-config
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+ingress:
+  enabled: false
+  ingressClassName: nginx
+  hosts:
+    - host: alertmanager.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: alertmanager-tls
+      hosts:
+        - alertmanager.example.internal

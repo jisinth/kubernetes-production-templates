@@ -1,0 +1,143 @@
+# Helm values for kube-prometheus-stack
+# Chart: prometheus-community/kube-prometheus-stack
+# Usage: helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#          -n monitoring --create-namespace -f values.yaml
+#
+# This file is mirrored at helm-values/prometheus.yaml — keep both in sync.
+
+fullnameOverride: kube-prometheus-stack
+
+prometheus:
+  prometheusSpec:
+    # How long samples are kept in local TSDB before being deleted.
+    # Increase only if you have the storage budget for it; prefer remoteWrite
+    # to a long-term store (Thanos/Mimir/Cortex) for anything beyond 15-30d.
+    retention: 15d
+    retentionSize: "45GB"
+
+    replicas: 2
+    shards: 1
+
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+
+    # Scrape ServiceMonitors/PodMonitors from every namespace, not just the
+    # release namespace. Combined with serviceMonitorSelector: {} below this
+    # lets teams self-service their own ServiceMonitor objects.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+    ruleSelector: {}
+    ruleNamespaceSelector: {}
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      fsGroup: 65534
+
+    podAntiAffinity: soft
+    podAntiAffinityTopologyKey: kubernetes.io/hostname
+
+    # --- Long-term storage / remote write --------------------------------
+    # Uncomment and point at Thanos receive, Mimir, Grafana Cloud, etc.
+    # Never commit real bearer tokens/passwords here — use a Secret +
+    # remoteWrite[].basicAuth or authorization.credentialsFile instead.
+    # remoteWrite:
+    #   - url: "https://<remote-write-endpoint>/api/v1/write"
+    #     basicAuth:
+    #       username:
+    #         name: prometheus-remote-write-creds
+    #         key: username
+    #       password:
+    #         name: prometheus-remote-write-creds
+    #         key: password
+    #     queueConfig:
+    #       maxSamplesPerSend: 5000
+    #       maxShards: 30
+    #       capacity: 10000
+    #     writeRelabelConfigs:
+    #       - sourceLabels: [__name__]
+    #         regex: "(up|node_.*|kube_.*)"
+    #         action: keep
+
+  # Ingress for the Prometheus UI. Keep this off (or behind auth) in
+  # production; prefer kubectl port-forward or a properly authenticated
+  # ingress with oauth2-proxy in front.
+  ingress:
+    enabled: false
+    ingressClassName: nginx
+    hosts:
+      - prometheus.example.internal
+    tls:
+      - secretName: prometheus-tls
+        hosts:
+          - prometheus.example.internal
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    replicas: 3
+    retention: 120h
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+  # We manage Alertmanager's config via manifests/alertmanager/config.yaml
+  # and the alertmanagerConfigSelector below rather than inline here.
+  alertmanagerConfigSelector: {}
+  alertmanagerConfigNamespaceSelector: {}
+
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+# Bundled Grafana is disabled — we run Grafana as its own release
+# (see manifests/grafana/) so upgrades and dashboards can be managed
+# independently of the Prometheus Operator lifecycle.
+grafana:
+  enabled: false
+
+defaultRules:
+  create: true
+  rules:
+    alertmanager: true
+    etcd: true
+    kubeApiserverAvailability: true
+    kubernetesApps: true
+    kubernetesResources: true
+    kubernetesStorage: true
+    kubernetesSystem: true
+    node: true
+    prometheus: true

@@ -1,0 +1,74 @@
+# Requires every container to declare CPU and memory requests/limits.
+# Without this, a single runaway pod can starve a node and take down
+# unrelated workloads that scheduled onto it.
+#
+# validationFailureAction: Audit while you're rolling this out against an
+# existing cluster (see README "Installation" for the audit->enforce
+# migration path); switch to Enforce once existing workloads are compliant.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Requests and Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Requires that all containers (and initContainers) have CPU and memory
+      requests and limits set, so the scheduler can bin-pack correctly and
+      no single pod can exhaust node resources.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-resources
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          CPU and memory requests/limits are required on every container
+          and initContainer. Add spec.containers[].resources.requests and
+          .limits (see manifests/kyverno/README.md for an example).
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.resources.requests.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.requests.memory || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.memory || '' }}"
+                    operator: Equals
+                    value: ""
+          - list: "request.object.spec.initContainers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.resources.requests.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.requests.memory || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.memory || '' }}"
+                    operator: Equals
+                    value: ""
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kyverno

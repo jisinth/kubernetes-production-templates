@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: springboot-app-config
+  namespace: default
+  labels:
+    app.kubernetes.io/name: springboot-app
+data:
+  SPRING_PROFILES_ACTIVE: "production,kubernetes"
+  SERVER_PORT: "8080"
+  MANAGEMENT_SERVER_PORT: "8080"
+  MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: "health,info,prometheus"
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  MANAGEMENT_HEALTH_LIVENESSSTATE_ENABLED: "true"
+  MANAGEMENT_HEALTH_READINESSSTATE_ENABLED: "true"
+  LOGGING_LEVEL_ROOT: "INFO"
+  LOGGING_LEVEL_COM_EXAMPLE_APP: "DEBUG"
+  LOGGING_FILE_NAME: "/app/logs/application.log"
+  # Mounted at /config/application-overrides.yaml via
+  # SPRING_CONFIG_ADDITIONAL_LOCATION in deployment.yaml.
+  application-overrides.yaml: |
+    server:
+      shutdown: graceful
+      tomcat:
+        threads:
+          max: 200
+        max-connections: 10000
+    spring:
+      lifecycle:
+        timeout-per-shutdown-phase: 30s
+      jpa:
+        open-in-view: false
+        properties:
+          hibernate:
+            jdbc:
+              batch_size: 50
+    management:
+      endpoint:
+        health:
+          show-details: when-authorized

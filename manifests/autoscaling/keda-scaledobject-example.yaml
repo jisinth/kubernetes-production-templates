@@ -1,0 +1,47 @@
+# KEDA ScaledObject that scales a Deployment based on a Prometheus query,
+# rather than CPU/memory. This is what HPA can't do on its own — scale on
+# a business/queue-depth metric (e.g. requests-per-second, queue backlog,
+# custom SLO burn rate) via KEDA's Prometheus scaler, which KEDA translates
+# into an HPA under the hood (KEDA manages the HPA object it creates
+# automatically — don't also hand-write a competing HPA for the same
+# target).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-processor-scaledobject
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-processor
+
+  minReplicaCount: 1
+  maxReplicaCount: 30
+  # Scale to zero when there's no backlog at all — HPA cannot do this,
+  # KEDA's activation/scaler split is what makes scale-to-zero possible.
+  idleReplicaCount: 0
+  pollingInterval: 15 # seconds between metric checks
+  cooldownPeriod: 300 # seconds of low metric before scaling back down
+
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+        # Queue depth exposed by the app itself (e.g. via a custom
+        # exporter) rather than raw CPU — scale on the thing that actually
+        # predicts load: work waiting to be processed.
+        query: >-
+          sum(rabbitmq_queue_messages_ready{queue="orders"})
+        threshold: "50"
+        activationThreshold: "1"
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 180
+          policies:
+            - type: Percent
+              value: 50
+              periodSeconds: 60

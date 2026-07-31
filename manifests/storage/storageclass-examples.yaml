@@ -1,0 +1,60 @@
+# StorageClass examples for the three major cloud block-storage
+# provisioners, shown side by side so you can pick the one matching your
+# cluster (AKS/EKS/GKE) and delete the rest. All three use
+# `volumeBindingMode: WaitForFirstConsumer` so the volume is provisioned in
+# the same zone as the pod that will actually mount it, rather than
+# whatever zone happens to be picked at PVC-creation time (which can
+# produce an unschedulable pod if the PV lands in the wrong zone).
+---
+# --- AWS EBS: gp3 ---------------------------------------------------------
+# gp3 decouples IOPS/throughput from volume size (unlike gp2), so you pay
+# for exactly the performance you configure instead of size-derived IOPS.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    # Make this the cluster default only if you delete/adjust the others,
+    # or the default annotation will conflict across StorageClasses.
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: "3000" # gp3 baseline; raise for IOPS-sensitive workloads (e.g. databases)
+  throughput: "125" # MiB/s baseline
+  encrypted: "true"
+  # kmsKeyId: arn:aws:kms:us-east-1:REPLACE_ME_ACCOUNT_ID:key/REPLACE_ME_KEY_ID
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+# --- Azure Disk: premium-ssd ----------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: premium-ssd
+provisioner: disk.csi.azure.com
+parameters:
+  skuName: Premium_LRS # Premium_ZRS for zone-redundant, higher cost
+  kind: managed
+  cachingMode: ReadOnly
+  diskEncryptionSetID: "" # set to a customer-managed key's resource ID, or omit for platform-managed keys
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+# --- GCE Persistent Disk: pd-ssd ------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: pd-ssd
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-ssd
+  # Regional PD survives a single zone failure at ~2x the cost of zonal —
+  # worth it for anything with a real availability SLO.
+  replication-type: none # alternatives: regional-pd
+  disk-encryption-kms-key: "" # set to a Cloud KMS key resource name, or omit for Google-managed keys
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

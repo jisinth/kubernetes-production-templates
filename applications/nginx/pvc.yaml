@@ -1,0 +1,23 @@
+# pvc.yaml — shared static content volume
+#
+# Multiple nginx replicas mount this PVC read-only, so it must support
+# ReadWriteMany. gp3 (EBS) does NOT support RWX — use an RWX-capable
+# StorageClass such as EFS (efs-sc), Azure Files, or Filestore in real
+# clusters. This manifest defaults to ReadWriteOnce/gp3 for single-replica
+# or single-node dev/test use; switch accessModes + storageClassName for
+# a true multi-replica production deployment.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nginx-web-content
+  namespace: default
+  labels:
+    app.kubernetes.io/name: nginx-web
+spec:
+  # accessModes: [ReadWriteMany]   # use this + an RWX StorageClass (e.g. efs-sc) for >1 replica
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 5Gi

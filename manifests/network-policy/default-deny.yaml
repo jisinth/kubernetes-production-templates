@@ -1,0 +1,20 @@
+# Default-deny-all NetworkPolicy. Applied per namespace, this blocks all
+# ingress AND egress traffic to/from every pod in the namespace that isn't
+# explicitly allowed by another NetworkPolicy. This is the foundation of a
+# zero-trust network posture — without it, "allow" policies are additive on
+# top of an already-open-by-default network, which defeats the purpose.
+#
+# Apply this FIRST, then layer allow-dns.yaml and allow-same-namespace.yaml
+# (or app-specific allow policies) on top, or every pod in the namespace
+# will lose connectivity (including DNS) the moment this is applied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: default # duplicate this manifest (or template it) per namespace
+spec:
+  podSelector: {} # empty selector = applies to every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress/egress rules defined => nothing is allowed by this policy.

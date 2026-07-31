@@ -1,0 +1,86 @@
+# Baseline RBAC for a namespace-scoped "developer" role, plus its
+# cluster-scoped counterpart for resources that don't live in a namespace.
+# This is the default access level a service team should get on their own
+# namespace: full control over their own workloads/config, read-only on
+# most cluster-scoped resources, and explicitly NOT Secrets-wide access,
+# RBAC-editing, or NetworkPolicy/ResourceQuota changes (those are
+# platform-owned).
+---
+# Namespace-scoped: full workload management within "team-a" only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: team-a
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Deliberately NOT included: Secrets write access (read own Secrets only,
+  # never list/create/edit — see the read-only Secret rule below),
+  # ResourceQuota/LimitRange (platform-owned, prevents a team from
+  # granting itself more quota), NetworkPolicy (platform-owned baseline,
+  # see ../network-policy/).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"] # read-only; no create/update/delete/watch on Secrets
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-binding
+  namespace: team-a
+subjects:
+  - kind: Group
+    name: team-a-developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: developer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Cluster-scoped, read-only: developers can see nodes/namespaces/CRDs to
+# understand cluster topology, but cannot modify anything outside their
+# own namespace's Role above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer-readonly-cluster
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: developer-readonly-cluster-binding
+subjects:
+  - kind: Group
+    name: team-a-developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: developer-readonly-cluster
+  apiGroup: rbac.authorization.k8s.io
