@@ -55,6 +55,24 @@ kubectl apply -f manifests/cert-manager/cluster-issuer-letsencrypt-prod.yaml
 
 `installCRDs: true` in [`values.yaml`](values.yaml) installs the `Certificate`/`Issuer`/`ClusterIssuer`/etc. CRDs as part of the chart. If you manage CRDs separately (common in GitOps setups where CRDs are applied out-of-band), set it to `false` and apply the CRD manifests from the [cert-manager release](https://github.com/cert-manager/cert-manager/releases) yourself first.
 
+### Upgrading
+
+cert-manager ships a compatibility policy of supporting the last few Kubernetes minor versions; always check the [supported releases table](https://cert-manager.io/docs/releases/) before upgrading either cert-manager or the cluster.
+
+1. **CRDs upgrade before the controller.** Helm's `installCRDs: true` handles this automatically on `helm upgrade`, but if CRDs are managed out-of-band, apply the new CRD manifests *first*, then upgrade the chart — running an old controller against new CRD schemas is fine, but a new controller against stale CRDs can fail to start.
+2. **Check for API version deprecations** — cert-manager has migrated its CRD API group across major versions before (`certmanager.k8s.io` → `cert-manager.io`, and `v1alpha2`/`v1alpha3`/`v1beta1` → `v1`). Run `cmctl upgrade migrate-api-version` before upgrading if you have any resources still on non-`v1` API versions — the tool rewrites `Issuer`/`Certificate`/etc. resources in place.
+3. **Never skip more than one major version** in a single upgrade — go through each major version's own upgrade notes sequentially; multi-version jumps are the most common source of cert-manager upgrade incidents reported upstream.
+4. Validate in staging with a real `Certificate` issuance/renewal cycle against `letsencrypt-staging` after every upgrade — a webhook or CRD conversion bug can pass health checks while silently breaking issuance.
+
+### Migrating from another certificate solution
+
+Moving from a different renewal mechanism (e.g. `kube-lego`, a manual/cron-based `certbot` setup, or hand-rotated certificates):
+
+1. Install cert-manager and apply `cluster-issuer-letsencrypt-staging.yaml` without touching any existing Ingress yet.
+2. Pick one low-traffic hostname, add the `cert-manager.io/cluster-issuer: letsencrypt-staging` annotation and a `tls` block pointing at a **new** `secretName` (don't reuse the existing manually-managed Secret name yet) — confirm end-to-end issuance works before touching production traffic.
+3. Once confirmed, re-point that Ingress's `secretName` to a fresh name managed by cert-manager against `letsencrypt-prod`, then repeat per-hostname across the fleet.
+4. Only after every hostname is cut over, remove the old renewal cron job/kube-lego deployment — running both systems against the same hostname simultaneously causes a race for the `Secret` and provider rate-limit consumption from duplicate issuance attempts.
+
 ## Verification
 
 ```bash
@@ -101,12 +119,22 @@ A `Certificate` reaching `READY=True` with a populated `secretName` confirms the
 - Issuance throughput is bounded by the ACME server's rate limits, not cert-manager's own resource allocation — raising `resources.limits` won't get you certificates faster.
 - With many `Certificate` objects (hundreds+), watch controller CPU during renewal windows (cert-manager batches renewal checks) and increase `resources.requests.cpu` if reconciliation lags.
 
+### High Availability considerations
+
+- **Leader election, not active-active**: `replicaCount: 2` for the controller relies on Kubernetes lease-based leader election — only one replica actively reconciles at any time. This protects against a single pod/node failure with a fast failover (leases expire in seconds), but it does not increase issuance throughput; don't scale the controller for capacity, only for availability.
+- **webhook and cainjector are stateless** — both scale horizontally with no coordination needed; 2 replicas of each purely for pod/node-failure tolerance during a cluster upgrade or node drain.
+- **cainjector is a soft dependency at steady state**: it only matters when the webhook's CA bundle needs (re)injecting — typically at install/upgrade time. A brief cainjector outage on an already-running cluster doesn't stop certificate issuance/renewal, only new webhook CA rotations.
+- **Renewal storms after an outage**: if cert-manager is down for an extended period (e.g. a botched upgrade) and several certificates cross their `renewBefore` threshold simultaneously, expect a burst of renewal requests on recovery — this can bump against Let's Encrypt's rate limits if dozens of certs queue up at once. Stagger `duration`/`renewBefore` across unrelated certificates rather than issuing them all with identical timing if you manage a large fleet.
+
 ## Common Problems
 
 1. **`Certificate` stuck at `READY=False`, Challenge stuck `pending`** — the HTTP-01 challenge path (`/.well-known/acme-challenge/...`) isn't reachable from the public internet. Check DNS actually resolves to the ingress-nginx external IP, and that no `NetworkPolicy`/firewall blocks inbound port 80 (ACME does not use 443 for the HTTP-01 challenge itself).
 2. **`urn:ietf:params:acme:error:rateLimited`** — you hit Let's Encrypt's production rate limit, usually from repeated failed attempts while debugging against `letsencrypt-prod` instead of `letsencrypt-staging`. Switch to staging, fix the underlying issue, confirm success, then re-point `issuerRef` to prod.
 3. **Webhook `x509: certificate signed by unknown authority` on `helm upgrade`** — the cainjector hasn't yet injected the webhook's CA bundle, usually right after install. Wait ~30s and retry, or check `kubectl get pods -n cert-manager` for a crashlooping cainjector.
 4. **Certificate issues successfully but browsers still show untrusted/self-signed** — you're pointed at `letsencrypt-staging`, which is a real ACME flow but its root CA isn't in any trust store by design. Re-issue against `letsencrypt-prod` once staging validates cleanly.
+5. **Resources stuck referencing a deprecated CRD API version after a cert-manager upgrade** — objects created under `v1alpha2`/`v1beta1` don't auto-migrate; the controller may refuse to reconcile them post-upgrade. Run `cmctl upgrade migrate-api-version` (or `kubectl get certificate.v1.cert-manager.io -A -o yaml` and reapply) to move them to `v1` before assuming the upgrade is broken.
+6. **Duplicate `Certificate` objects for the same hostname fighting each other** — one created via the Ingress-shim annotation and another via an explicit `Certificate` manifest both targeting the same `secretName` will race on renewal and issuance, doubling ACME calls against the same rate limit bucket. Pick one mechanism per hostname — either the annotation shim or an explicit `Certificate`, never both.
+7. **Renewal succeeds but the Ingress keeps serving the old (expiring) certificate** — some ingress controllers cache TLS certificate data per-connection or per-worker and don't always pick up a `Secret` update instantly. Confirm the `Secret`'s `tls.crt` actually changed (`kubectl get secret ... -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -dates`) before assuming cert-manager failed — if the Secret is correct but the served cert is stale, it's an ingress-nginx reload issue, not a cert-manager one.
 
 ## Best Practices
 

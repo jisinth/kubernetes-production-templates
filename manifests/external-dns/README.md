@@ -56,6 +56,21 @@ kubectl apply -f manifests/external-dns/deployment.yaml
 
 **Before running against a real/shared zone**: add `--dry-run` to `args`/`extraArgs`, install, and check the logs to see exactly what records external-dns *would* create/delete, without it touching anything. Remove `--dry-run` once you've confirmed the plan looks correct.
 
+### Upgrading
+
+1. Check the [release notes](https://github.com/kubernetes-sigs/external-dns/releases) for flag renames — provider auth flags in particular have been renamed across major versions (e.g. AWS-specific flags have shifted between `--aws-*` and generic `--provider`-scoped equivalents at various points). A silently-ignored unknown flag can leave external-dns running with defaults instead of your intended config.
+2. Because `replicaCount: 1` with `strategy: Recreate` is the standard topology here, a `helm upgrade` causes a brief gap (old pod terminates, new pod starts) where no reconciliation happens — this is safe (DNS records don't disappear, they just stop being *updated* for a minute) but isn't zero-downtime for record propagation. Schedule upgrades outside active DNS cutover windows.
+3. Newer external-dns versions have added optional leader-election-based multi-replica support for some providers — if adopting it, verify your specific provider's controller supports it before raising `replicaCount` above 1; doing so on a provider/version that doesn't support leader election reintroduces the record-flapping race described in Scaling.
+
+### Migrating an existing manually-managed zone onto external-dns
+
+This is the highest-risk operation for this component — getting it wrong causes external-dns to delete records it doesn't recognize as "owned."
+
+1. Install with `policy: upsert-only` and `--dry-run` first — confirm the dry-run plan shows only `CREATE`s for records that don't already exist, never `DELETE`s, before going further.
+2. Remove `--dry-run` while keeping `policy: upsert-only` — external-dns starts managing the records it creates going forward (with TXT ownership markers) but never touches pre-existing manually-created records it didn't create itself.
+3. Only switch to `policy: sync` once every record in the zone that should be external-dns-managed actually has a matching Ingress/Service source *and* a TXT ownership record — `sync` will delete any record it believes it owns that no longer has a corresponding source, so confirm ownership tracking is complete first via `dig TXT external-dns-<record>.<zone>`.
+4. Keep a full DNS zone export (`aws route53 list-resource-record-sets` or equivalent) taken immediately before this migration — it's the fastest rollback path if `sync` policy removes something unexpected.
+
 ## Verification
 
 ```bash
@@ -95,12 +110,23 @@ dig +short app.example.com
 - `--interval` controls reconciliation frequency, not throughput — lower it (e.g. `30s`) for faster DNS propagation after an Ingress change, at the cost of more frequent provider API calls (watch cloud API rate limits at very short intervals).
 - Very large clusters (many hundreds of Ingress/Service objects) may want `--interval` raised slightly and `resources.limits.memory` increased, since external-dns holds the full desired-state record set in memory per reconciliation.
 
+### High Availability considerations
+
+external-dns is the one component in this v1.0 set that deliberately runs **without** multi-replica HA by default, which is worth calling out explicitly:
+
+- **Single point of failure by design**: with `replicaCount: 1`/`strategy: Recreate`, a node failure hosting the external-dns pod causes a gap in DNS reconciliation until Kubernetes reschedules it (typically under a minute). During that gap, existing DNS records are untouched and continue resolving normally — only *new* record creation/updates pause.
+- **Why not just run 3 replicas like everything else**: without provider-side coordination, multiple active reconcilers computing the same "current vs. desired" diff independently can each attempt conflicting Create/Delete API calls against the provider in the same window, causing visible record flapping. This is a correctness constraint, not a missed optimization — don't "fix" it by bumping `replicaCount` without first confirming your external-dns version + provider combination explicitly supports leader election.
+- **Mitigating the single-replica risk**: rely on Kubernetes' own pod rescheduling (fast on any healthy cluster) rather than application-level replication, and alert on `external-dns` pod restarts / `up{job="external-dns"}` gaps via Prometheus rather than trying to eliminate the single-replica window entirely.
+- **Regional/multi-cluster DNS**: for active/active multi-region deployments, run one external-dns instance per cluster with a distinct `txtOwnerId` per cluster and disjoint `domainFilters`/subdomains per region where possible, rather than pointing multiple clusters' external-dns instances at the exact same records.
+
 ## Common Problems
 
 1. **Records never appear, no errors in logs** — check `domainFilters` includes the zone, and that `sources` includes the object type you're using (`ingress` vs `service`). Also confirm the Ingress actually has a `host` set — external-dns has nothing to create a record for otherwise.
 2. **`AccessDenied` / `403` from the cloud provider API** — IAM role/policy doesn't have write access to the target zone, or the ServiceAccount annotation (`eks.amazonaws.com/role-arn` etc.) doesn't match what's configured in IAM/the identity provider trust policy. Verify the ServiceAccount's projected token is being exchanged correctly (`kubectl describe pod` for IRSA env vars, or `aws sts get-caller-identity` from inside the pod).
 3. **external-dns deletes records it doesn't own** — `txtOwnerId` collision between two external-dns instances pointed at the same zone, or `registry` wasn't set to `txt` on an earlier install so ownership was never tracked. Fix by giving each instance a unique `txtOwnerId` and ensuring `registry: txt` was enabled from the start.
 4. **DNS record created but points at the wrong IP after a LoadBalancer Service is replaced** — normal eventual consistency; check `--interval` and confirm the reconciliation actually ran (`kubectl logs`). If the record is stuck stale, check for a second controller (e.g. a cloud-provider's own DNS integration) fighting for ownership of the same record outside the TXT registry.
+5. **Provider API rate-limited / `Throttling` errors in logs** — very short `--interval` combined with a large record count can exceed provider API quotas (e.g. Route53's per-account API call limits), especially right after startup when external-dns does a full zone read. Raise `--interval`, and check whether `--aws-batch-change-size` (or the provider-equivalent batching flag) is set low enough to avoid single giant change-set requests that some providers reject outright.
+6. **TXT ownership records missing after a version upgrade, causing `sync` to refuse deletions it should make** — a small number of past external-dns releases changed the default TXT record format/prefix; records created under an old format aren't recognized as owned by a newer version expecting the new format. Check `--txt-prefix`/`--txt-suffix` explicitly rather than relying on defaults across upgrades, and audit `dig TXT` output against what the running version expects before assuming `sync` policy is broken.
 
 ## Best Practices
 

@@ -54,6 +54,19 @@ kubectl apply -f manifests/ingress-nginx/service.yaml
 
 The standalone path omits the Helm chart's RBAC, admission webhook, and ServiceMonitor — add those yourself or accept a controller that can't validate Ingress objects at admission time (misconfigured Ingresses will only surface as runtime errors instead of being rejected up front).
 
+### Upgrading
+
+ingress-nginx major/minor versions occasionally change default behaviors (e.g. dynamic vs. full-reload configuration, deprecated annotation removals) — always read the [chart's release notes](https://github.com/kubernetes/ingress-nginx/blob/main/charts/ingress-nginx/README.md) before bumping `controller.image.tag`.
+
+1. Diff the new chart version's default `values.yaml` against [`values.yaml`](values.yaml) — `helm show values ingress-nginx/ingress-nginx --version <new>` — to catch renamed/removed keys before they silently no-op.
+2. Upgrade the CRDs/webhook first in a non-prod cluster: `helm upgrade --install ingress-nginx ... --version <new> -f helm-values/ingress-nginx.yaml --wait`, then run the smoke test in [`install.md`](install.md#7-smoke-test) against a handful of real Ingress objects, particularly ones using annotations that changed between versions.
+3. In production, upgrade with `controller.replicaCount` unchanged and rely on the Deployment's rolling update (`maxUnavailable: 0`, `maxSurge: 1` recommended) so capacity never drops during the swap — never `kubectl delete` and reapply the controller Deployment as an upgrade strategy.
+4. For a major version bump you're not confident in, run the new version as a second `IngressClass` (e.g. `nginx-v2`) alongside the existing controller, move a handful of low-risk Ingresses to it by setting `ingressClassName: nginx-v2`, and only cut the `is-default-class` flag over once validated — this avoids an all-or-nothing cluster-wide swap.
+
+### Migrating from another ingress controller
+
+Moving from a different controller (Traefik, HAProxy, a cloud-managed ALB ingress, etc.) to ingress-nginx: install ingress-nginx with a **non-default** `IngressClass` first (`ingressclass.yaml` with `is-default-class: false`), migrate Ingress objects one at a time by setting `spec.ingressClassName: nginx` and watching `kubectl describe ingress` for admission errors from annotation syntax differences (every controller has its own annotation dialect — none of it carries over automatically), then decommission the old controller only once 100% of Ingress objects have moved and DNS/LB traffic has been confirmed flowing through the new one.
+
 ## Verification
 
 ```bash
@@ -103,12 +116,23 @@ Key knobs, set in [`values.yaml`](values.yaml) / [`../../helm-values/ingress-ngi
 - `podDisruptionBudget.minAvailable: 2` prevents a node drain/cluster upgrade from taking out all controllers simultaneously.
 - Horizontal scaling of the controller doesn't shard by hostname — every replica holds the full NGINX config for every Ingress in the cluster. At very large Ingress counts (thousands), watch controller reload latency and consider `ingress-nginx`'s dynamic configuration mode (already default in modern chart versions) which avoids full reloads for endpoint-only changes.
 
+### High Availability considerations
+
+- **Zone-aware spreading**: set `controller.topologySpreadConstraints` with `topologyKey: topology.kubernetes.io/zone` and `whenUnsatisfiable: DoNotSchedule` — without it, the scheduler can (and eventually will) place all 3 replicas in one zone, and a single zone outage takes the entire ingress layer down along with it.
+- **PDB vs. node drains**: `podDisruptionBudget.minAvailable: 2` with `replicaCount: 3` tolerates one voluntary disruption (a node drain during cluster upgrade) at a time. During a full cluster upgrade that drains every node in sequence, this correctly serializes controller pod evictions instead of letting the upgrade take out all three simultaneously — verify with `kubectl get pdb -n ingress-nginx` before starting a node pool upgrade.
+- **Admission webhook is a single point of failure for `kubectl apply`, not for traffic**: if every controller pod's webhook endpoint becomes unreachable (e.g. all replicas down simultaneously), new/changed Ingress objects will fail to apply cluster-wide, but *already-configured* NGINX keeps serving existing traffic unaffected — webhook availability affects config changes, not the data plane.
+- **Rolling controller restarts and in-flight connections**: NGINX workers finish in-flight requests before terminating (`terminationGracePeriodSeconds`, default 300s in the upstream chart) — don't lower this aggressively on a controller carrying long-lived connections (websockets, gRPC streams) or you'll cut them mid-request during routine rollouts.
+- **Cross-region/multi-cluster HA**: for true regional failover, run independent ingress-nginx + LoadBalancer stacks per region behind a global load balancer or DNS failover (see `manifests/external-dns/`) — ingress-nginx itself has no built-in cross-cluster awareness.
+
 ## Common Problems
 
 1. **`EXTERNAL-IP` stuck at `<pending>`** — the cluster's cloud controller manager isn't provisioning LoadBalancers, or you're on bare metal without MetalLB/similar. Check `kubectl describe svc ingress-nginx-controller -n ingress-nginx` for events; on bare metal, switch to `NodePort` + an external LB, or install MetalLB.
 2. **`503 Service Temporarily Unavailable` for a valid Ingress** — usually the backend Service has no ready endpoints. Check `kubectl get endpoints <svc>` — if empty, the backend pods are failing readiness probes, not an ingress-nginx problem.
 3. **`Ingress` applied but never picked up / no route** — `spec.ingressClassName` doesn't match `nginx`, or an older cluster is relying on the deprecated `kubernetes.io/ingress.class` annotation which this controller version may not read by default. Set `ingressClassName: nginx` explicitly.
 4. **cert-manager challenge fails with `404` from the ACME validation server** — the HTTP-01 solver's temporary Ingress isn't routing through this same controller/IngressClass, often because a second ingress controller in the cluster is intercepting the challenge path. Confirm only one `IngressClass` is marked `is-default-class: true`, and that the solver's `ingressClassName` matches this controller.
+5. **Latency spikes / dropped connections right after applying many Ingress changes at once** — bulk changes (e.g. a GitOps sync applying dozens of Ingresses in one batch) can trigger repeated full NGINX reloads if any change touches a non-dynamic config path (annotations affecting the main `nginx.conf` template rather than just upstream endpoints). Batch related Ingress changes into fewer `kubectl apply`/sync operations where possible, and check `nginx_ingress_controller_config_last_reload_successful` / reload count metrics via the ServiceMonitor to confirm reload frequency isn't the cause of intermittent latency.
+6. **Sticky sessions stop working after a rollout or scale event** — `nginx.ingress.kubernetes.io/affinity: cookie` sessions are tied to specific backend pod IPs; any event that changes the pod set (deploy, HPA scale, node eviction) invalidates existing session cookies for affected clients, which is expected NGINX cookie-affinity behavior, not a bug. If this is unacceptable, move session state out of the pod (external cache/store) rather than relying on ingress-level stickiness.
+7. **Admission webhook times out during a cluster control-plane upgrade** — the webhook's `caBundle` (injected by the chart's pre-install hook, or manually) can go stale if the webhook Service/Endpoints briefly disappear during a control-plane version skew window. `kubectl apply` calls hang or fail with a webhook timeout; check `kubectl get validatingwebhookconfigurations ingress-nginx-admission -o yaml` for a stale `caBundle` and consider `controller.admissionWebhooks.failurePolicy: Ignore` temporarily during planned control-plane maintenance if blocking all Ingress changes during the window isn't acceptable.
 
 ## Best Practices
 

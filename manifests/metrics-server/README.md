@@ -49,6 +49,14 @@ kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/late
 kubectl apply -f manifests/metrics-server/deployment.yaml   # overrides the Deployment with our resource/security settings
 ```
 
+### Upgrading
+
+metrics-server tracks the `metrics.k8s.io` aggregated API contract closely with Kubernetes releases — check the [compatibility matrix](https://github.com/kubernetes-sigs/metrics-server#compatibility-matrix) before bumping across a Kubernetes minor version boundary, not just a metrics-server version boundary.
+
+1. Because metrics-server is stateless and HPA/VPA degrade gracefully (they just pause scaling decisions, they don't crash) during a brief gap, upgrades are low-risk — a standard rolling `helm upgrade` is sufficient, no special draining needed.
+2. After upgrading, immediately re-check `kubectl top nodes` and `kubectl describe hpa` on a couple of autoscaled workloads — a version bump that changes a default flag (e.g. `--metric-resolution`) can silently change HPA responsiveness without any error being surfaced.
+3. If migrating off a very old release (pre-`v0.6`) that used `--kubelet-preferred-address-types=InternalDNS,InternalIP,ExternalDNS,ExternalIP,Hostname`, review whether the flag defaults changed — some historical upgrades altered the default address-type preference order, which can break kubelet reachability on clusters relying on non-default node addressing.
+
 ## Verification
 
 ```bash
@@ -81,12 +89,21 @@ If `kubectl top` returns `error: metrics not available yet`, wait ~60 seconds af
 - Very large clusters (1000+ nodes): raise `resources.requests`/`limits` and consider `--metric-resolution` slightly higher than 15s to reduce kubelet scrape load, since HPA responsiveness is usually not the bottleneck at that scale.
 - metrics-server does not shard — every replica independently scrapes every kubelet; replicas provide availability, not horizontal capacity.
 
+### High Availability considerations
+
+- **No leader election, no shared state** — unlike cert-manager or external-dns, every metrics-server replica independently scrapes and serves; there's no split-brain risk from running N replicas, and the aggregated API layer (`kube-apiserver`) load-balances requests across whichever replicas are ready.
+- **Pod anti-affinity, not just replica count, is what buys you availability** — 2 replicas scheduled onto the same node defeats the purpose; set `podAntiAffinity` (already in [`values.yaml`](values.yaml)) so a single node failure can't take down every replica simultaneously.
+- **PDB matters less here than for stateful/ingress-facing components** — a brief total outage degrades to "HPA decisions pause, `kubectl top` errors" rather than a user-facing incident, so a `minAvailable: 1` PDB is normally sufficient rather than the stricter budgets used for ingress-nginx.
+- **The real availability risk is upstream, not metrics-server itself**: if the `kube-apiserver`'s aggregation layer or the `metrics.k8s.io` `APIService` registration breaks (e.g. a botched cluster upgrade), metrics-server pods can be perfectly healthy while `kubectl top` and HPA both fail — always check `kubectl get apiservice v1beta1.metrics.k8s.io` alongside pod health when diagnosing an outage.
+
 ## Common Problems
 
 1. **`kubectl top nodes` → `error: metrics not available yet`** — either just installed (wait ~1 minute) or the APIService isn't registered/available. Check `kubectl get apiservice v1beta1.metrics.k8s.io -o yaml` for `status.conditions`.
 2. **`x509: cannot validate certificate` in metrics-server logs** — kubelet serving certs aren't trusted by metrics-server's CA bundle. Either fix kubelet certificate rotation/signing, or as a stopgap uncomment `--kubelet-insecure-tls` (understand the tradeoff above before doing so).
 3. **HPA shows `<unknown>` for current CPU/memory** — metrics-server itself is up, but the target Deployment's pods don't have `resources.requests` set (HPA needs a request baseline to compute utilization percentage), or the pod is too new for a metrics sample yet. Set explicit `resources.requests` on the target workload.
 4. **metrics-server pod `CrashLoopBackOff` with `dial tcp ... connect: no route to host`** — a `NetworkPolicy` or firewall is blocking metrics-server pods from reaching kubelets on port 10250. Add an explicit allow rule from the `kube-system` (or wherever metrics-server runs) namespace to the node network on that port.
+5. **Metrics go stale/flat during a large rolling restart or node pool upgrade** — a mass pod churn event can transiently outpace metrics-server's 15s scrape interval, showing the same CPU/memory value across several samples. This is a real staleness gap, not a bug; HPA's own stabilization windows (`behavior.scaleUp/scaleDown.stabilizationWindowSeconds`) are designed to tolerate exactly this kind of short-lived noise — don't shorten `--metric-resolution` reactively during an incident as a fix.
+6. **A service mesh sidecar breaks kubelet scraping unexpectedly** — if metrics-server itself is enrolled into a mesh with strict mTLS (e.g. its egress traffic gets intercepted), scrapes to kubelet's HTTPS port can fail cert validation even though direct connectivity works. Exclude metrics-server's pod from mesh sidecar injection (it needs direct node-network reachability, not mesh-internal service-to-service semantics) rather than debugging it as a kubelet TLS issue.
 
 ## Best Practices
 

@@ -43,6 +43,15 @@ kubectl apply -f manifests/namespace/
 
 There is no Helm chart for this folder — namespaces are simple enough that a templated chart adds more indirection than value. If you use ArgoCD (see `manifests/argocd/`), point an `Application` at this directory with `syncPolicy.syncOptions: [CreateNamespace=false]` since the namespaces are managed here explicitly, not auto-created by other apps.
 
+### Upgrading an Existing Namespace's Quota or PSA Level
+
+Namespace-level changes are live edits, not rollouts — there's no "version" to upgrade, but tightening posture on a namespace with running workloads needs a staged approach:
+
+1. **Raising a ResourceQuota** is always safe to apply directly — it can only unblock previously-rejected pods, never evict running ones.
+2. **Lowering a ResourceQuota** below current usage does *not* evict existing pods (quota is enforced at admission, not continuously), but blocks new pods/scale-ups until usage drops below the new cap. Check current usage first: `kubectl describe resourcequota -n <ns>`.
+3. **Tightening PSA from `baseline` to `restricted`** on a namespace with running workloads: PSA `enforce` only blocks *new* pod creations and updates that change the pod spec — existing non-compliant pods keep running untouched. Before flipping `enforce`, set `pod-security.kubernetes.io/audit: restricted` and `pod-security.kubernetes.io/warn: restricted` (leaving `enforce: baseline`) for a full deploy cycle, then check `kubectl get events -n <ns> --field-selector reason=PodSecurity` and API server audit logs for what would have been rejected. Fix flagged workloads, then flip `enforce: restricted`.
+4. **Renaming a namespace** isn't supported by Kubernetes — there is no atomic rename. Create the new namespace, migrate objects (`kubectl get <resource> -n old -o yaml`, strip `resourceVersion`/`uid`/`namespace`, reapply with `-n new`), cut over Services/DNS/Ingress references, then delete the old namespace once nothing points at it.
+
 ## Verification
 
 ```bash
@@ -86,12 +95,22 @@ kubectl run privileged-test --image=nginx --overrides='{"spec":{"containers":[{"
 - If a single environment namespace becomes a scaling bottleneck (e.g. one team dominates the `production` quota), consider splitting by team/product into additional namespaces (`production-team-a`, `production-team-b`) each with its own quota, rather than inflating one shared quota indefinitely.
 - For clusters with many namespaces, template these three manifests with Kustomize overlays or a small Helm chart to avoid drift as quota numbers are tuned per environment.
 
+### High Availability & Multi-Cluster Considerations
+
+Namespaces themselves have no HA dimension — they're API objects, not a workload with replicas — but the quota/PSA strategy they encode has real availability implications:
+
+- **Quota headroom for failover**: if `production` runs across multiple clusters (active/passive or active/active DR), size the ResourceQuota in each cluster for the *failed-over* load, not steady-state load, or a regional failover will hit quota limits exactly when it needs to scale up.
+- **Cross-cluster consistency**: keep `production.yaml`/`staging.yaml`/`development.yaml` byte-identical (modulo quota sizing) across every cluster running that environment tier — apply them from this same repo via ArgoCD (`manifests/argocd/`) to each cluster rather than hand-editing per cluster, so PSA level and label sets never silently drift between regions.
+- **LimitRange defaults during multi-cluster migration**: when moving workloads between clusters, a mismatched `LimitRange.default` between source and destination can silently change a pod's effective resource limits with no error — diff `kubectl describe limitrange` output between clusters before a migration, not after.
+
 ## Common Problems
 
 1. **Pods stuck in `Pending` with `forbidden: exceeded quota`** — the namespace's ResourceQuota is exhausted. Run `kubectl describe resourcequota -n <ns>` to see used vs. hard limits, then either free up capacity or raise the quota.
 2. **New pods rejected with `must specify memory/cpu limits`** — happens when a ResourceQuota with `limits.cpu`/`limits.memory` exists but the pod's containers don't declare resources, and (unusually) the LimitRange default wasn't applied — most often because the LimitRange was deleted or never applied in that namespace. Reapply `limitrange.yaml`/the namespace manifest.
 3. **Pod rejected with `violates PodSecurity "restricted:latest"`** — the workload needs privilege it can't have in `production` (e.g. `runAsUser: 0`, missing `seccompProfile`). Fix the pod's `securityContext` rather than lowering the namespace's PSA level; if the workload genuinely needs an exception, deploy it into a dedicated namespace with a documented, reviewed exemption instead of weakening `production`.
 4. **`count/deployments.apps` quota exceeded during a rollout** — some quota configurations count old and new ReplicaSets during a rolling update. Check `maxSurge`/`maxUnavailable` on the Deployment and raise `count/deployments.apps` or `pods` headroom if legitimate rollouts are being blocked.
+5. **Workload passes `audit`/`warn` cleanly but is rejected once `enforce` flips to `restricted`** — audit/warn use the same PSA admission logic but the pod's actual runtime `securityContext` at apply-time is what's checked; a workload whose manifest looks compliant but relies on a mutating webhook (e.g. a sidecar injector) to add the missing fields can pass a manual review yet fail at admission if that webhook runs after PSA in the chain. Check `kubectl get mutatingwebhookconfigurations` ordering and confirm PSA sees the *final* pod spec, not the pre-mutation one.
+6. **Two teams' workloads in the same namespace fight over ResourceQuota** — a shared `production` namespace with one aggregate quota gives no per-team fairness; one team's traffic spike can starve another's ability to scale. Split into per-team namespaces (`production-team-a`) each with its own quota, rather than trying to sub-allocate a single namespace's quota via convention alone.
 
 ## Best Practices
 
