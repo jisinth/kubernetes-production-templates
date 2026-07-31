@@ -23,10 +23,12 @@ jobs:
         run: pip install yamllint
 
       - name: Lint manifests/
-        run: yamllint -d "{extends: default, rules: {line-length: {max: 200}}}" manifests/
+        run: |
+          yamllint -d "{extends: default, rules: {line-length: {max: 200}}}" manifests/
 
       - name: Lint helm-values/
-        run: yamllint -d "{extends: default, rules: {line-length: {max: 200}}}" helm-values/
+        run: |
+          yamllint -d "{extends: default, rules: {line-length: {max: 200}}}" helm-values/
 
   helm-lint:
     name: helm lint

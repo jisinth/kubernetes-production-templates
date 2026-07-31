@@ -24,7 +24,12 @@ jobs:
 
       - name: Validate manifests/
         run: |
-          find manifests -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 \
+          set -euo pipefail
+          # manifests/ also holds Helm values files and raw app config
+          # snippets (loki/config.yaml, alertmanager/routes.yaml, etc.)
+          # that are intentionally not Kubernetes resources — only
+          # kubeconform files that actually declare a top-level `kind:`.
+          grep -rlZ '^kind:' manifests --include="*.yaml" --include="*.yml" \
             | xargs -0 kubeconform -strict -ignore-missing-schemas -summary \
                 -kubernetes-version 1.29.0 \
                 -schema-location default \
@@ -32,6 +37,7 @@ jobs:
 
       - name: Validate applications/
         run: |
+          set -euo pipefail
           find applications -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 \
             | xargs -0 kubeconform -strict -ignore-missing-schemas -summary \
                 -kubernetes-version 1.29.0 \
